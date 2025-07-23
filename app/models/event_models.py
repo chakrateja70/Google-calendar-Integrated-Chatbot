@@ -1,5 +1,46 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Optional, List, Dict
+
+# Error Response Models
+class ErrorResponse(BaseModel):
+    """Standard error response model"""
+    statusCode: int = Field(..., description="HTTP status code", example=400)
+    errorMessage: str = Field(..., description="Human-readable error message", example="Invalid request data provided")
+    statusMessage: str = Field(..., description="HTTP status message", example="Bad Request")
+    detail: str = Field(..., description="Detailed error information", example="Create event: Bad Request: Invalid event data")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "statusCode": 400,
+                "errorMessage": "Invalid request data provided",
+                "statusMessage": "Bad Request",
+                "detail": "Create event: Bad Request: Invalid event data"
+            }
+        }
+
+class ValidationErrorResponse(BaseModel):
+    """Validation error response model"""
+    statusCode: int = Field(422, description="HTTP status code")
+    errorMessage: str = Field("Validation failed", description="Error message")
+    statusMessage: str = Field("Unprocessable Entity", description="HTTP status message")
+    detail: List[Dict] = Field(..., description="Validation error details")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "statusCode": 422,
+                "errorMessage": "Validation failed",
+                "statusMessage": "Unprocessable Entity",
+                "detail": [
+                    {
+                        "loc": ["body", "start", "dateTime"],
+                        "msg": "field required",
+                        "type": "value_error.missing"
+                    }
+                ]
+            }
+        }
 
 class CalendarListItem(BaseModel):
     """Model for individual calendar item"""
@@ -15,7 +56,7 @@ class CalendarListItem(BaseModel):
     selected: Optional[bool] = Field(None, description="Whether calendar is selected", example=True)
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "id": "primary",
                 "summary": "My Calendar",
@@ -41,7 +82,7 @@ class CalendarIDsResponse(BaseModel):
     message: str = Field("Calendar IDs retrieved successfully", description="Response message", example="Calendar IDs retrieved successfully")
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "kind": "calendar#calendarList",
                 "etag": "\"p33g-uP7XcQh6v_cztmGnhV2_lk/abc123\"",
@@ -69,7 +110,7 @@ class DefaultReminder(BaseModel):
     minutes: int = Field(..., description="Minutes before event", ge=0, le=40320, example=15)
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "method": "popup",
                 "minutes": 15
@@ -93,7 +134,7 @@ class EventItem(BaseModel):
     reminders: Optional[Dict] = Field(None, description="Event reminders", example={"useDefault": True})
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "id": "abc123def456ghi789",
                 "summary": "Weekly Stand-up",
@@ -144,7 +185,7 @@ class ListEventsResponse(BaseModel):
     message: str = Field("Events retrieved successfully", description="Response message", example="Events retrieved successfully")
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "kind": "calendar#events",
                 "summary": "My Calendar",
@@ -191,11 +232,38 @@ class EventDateTime(BaseModel):
     date: Optional[str] = Field(None, description="Date in YYYY-MM-DD format for all-day events", example="2025-07-24")
     timeZone: Optional[str] = Field(None, description="Time zone (e.g., 'America/New_York')", example="UTC")
     
+    @model_validator(mode='after')
+    def validate_datetime_or_date(self):
+        """Validate that either dateTime or date is provided"""
+        if not self.dateTime and not self.date:
+            raise ValueError("Either 'dateTime' or 'date' must be provided")
+        # Google Calendar API requires either dateTime OR date, not both
+        if self.dateTime and self.date:
+            raise ValueError("Cannot specify both 'dateTime' and 'date'")
+        return self
+    
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "dateTime": "2025-07-24T10:00:00Z",
                 "timeZone": "UTC"
+            }
+        }
+
+
+class Attendee(BaseModel):
+    """Model for event attendee"""
+    email: str = Field(..., description="Attendee email address", example="attendee@example.com")
+    displayName: Optional[str] = Field(None, description="Attendee display name", example="John Doe")
+    responseStatus: Optional[str] = Field("needsAction", description="Response status", example="needsAction")
+    comment: Optional[str] = Field(None, description="Attendee comment", example="Looking forward to the meeting")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "email": "attendee@example.com",
+                "displayName": "John Doe",
+                "responseStatus": "needsAction"
             }
         }
 
@@ -207,9 +275,15 @@ class EventCreate(BaseModel):
     location: Optional[str] = Field(None, description="Event location", max_length=1024, example="Conference Room A")
     start: EventDateTime = Field(..., description="Event start date/time")
     end: EventDateTime = Field(..., description="Event end date/time")
+    attendees: Optional[List[Attendee]] = Field(
+        None, 
+        description="Event attendees - Optional field. If provided, invitations will be sent to all attendees.", 
+        example=[],
+        title="Attendees (Optional)"
+    )
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "summary": "Team Meeting",
                 "description": "Weekly team sync meeting",
@@ -221,8 +295,19 @@ class EventCreate(BaseModel):
                 "end": {
                     "dateTime": "2025-07-24T11:00:00Z",
                     "timeZone": "UTC"
-                }
-            }
+                },
+                "attendees": [
+                    {
+                        "email": "john.doe@example.com",
+                        "displayName": "John Doe"
+                    },
+                    {
+                        "email": "jane.smith@example.com",
+                        "displayName": "Jane Smith"
+                    }
+                ]
+            },
+            "description": "Create a new calendar event. The 'attendees' field is optional - omit it to create an event without attendees."
         }
 
 
@@ -234,13 +319,14 @@ class EventResponse(BaseModel):
     location: Optional[str] = Field(None, description="Event location", example="Conference Room A")
     start: Dict = Field(..., description="Event start time", example={"dateTime": "2025-07-24T10:00:00Z", "timeZone": "UTC"})
     end: Dict = Field(..., description="Event end time", example={"dateTime": "2025-07-24T11:00:00Z", "timeZone": "UTC"})
+    attendees: Optional[List[Dict]] = Field(None, description="List of event attendees")
     htmlLink: str = Field(..., description="Event HTML link", example="https://www.google.com/calendar/event?eid=abc123def456ghi789")
     created: str = Field(..., description="Creation time", example="2025-07-23T08:30:00Z")
     updated: str = Field(..., description="Last update time", example="2025-07-23T08:30:00Z")
     status: str = Field(..., description="Event status", example="confirmed")
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "id": "abc123def456ghi789",
                 "summary": "Team Meeting",
@@ -254,6 +340,18 @@ class EventResponse(BaseModel):
                     "dateTime": "2025-07-24T11:00:00Z",
                     "timeZone": "UTC"
                 },
+                "attendees": [
+                    {
+                        "email": "john.doe@example.com",
+                        "displayName": "John Doe",
+                        "responseStatus": "accepted"
+                    },
+                    {
+                        "email": "jane.smith@example.com", 
+                        "displayName": "Jane Smith",
+                        "responseStatus": "needsAction"
+                    }
+                ],
                 "htmlLink": "https://www.google.com/calendar/event?eid=abc123def456ghi789",
                 "created": "2025-07-23T08:30:00Z",
                 "updated": "2025-07-23T08:30:00Z",

@@ -21,7 +21,7 @@ app.add_middleware(
 )
 
 # Include API routes
-app.include_router(router, prefix="", tags=["Calendar"])
+app.include_router(router, prefix="")
 
 # # Root endpoint
 # @app.get("/")

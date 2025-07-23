@@ -254,10 +254,37 @@ def create_event_service(token: str, event_data: EventCreate) -> EventResponse:
         }
         
         # Convert Pydantic model to dict for API request
+        start_data = event_data.start.model_dump(exclude_none=True)
+        end_data = event_data.end.model_dump(exclude_none=True)
+        
+        # Validate that we have either dateTime or date for both start and end
+        if not (start_data.get("dateTime") or start_data.get("date")):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "statusCode": 400,
+                    "errorMessage": "Invalid request data provided",
+                    "statusMessage": "Bad Request",
+                    "detail": "Start time must have either 'dateTime' or 'date' field"
+                }
+            )
+        
+        if not (end_data.get("dateTime") or end_data.get("date")):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "statusCode": 400,
+                    "errorMessage": "Invalid request data provided", 
+                    "statusMessage": "Bad Request",
+                    "detail": "End time must have either 'dateTime' or 'date' field"
+                }
+            )
+        
+        # Build event body
         event_body = {
             "summary": event_data.summary,
-            "start": event_data.start.dict(exclude_none=True),
-            "end": event_data.end.dict(exclude_none=True)
+            "start": start_data,
+            "end": end_data
         }
         
         # Add optional fields if provided
@@ -265,6 +292,14 @@ def create_event_service(token: str, event_data: EventCreate) -> EventResponse:
             event_body["description"] = event_data.description
         if event_data.location:
             event_body["location"] = event_data.location
+        if event_data.attendees:
+            # Convert Pydantic attendee models to dict format for Google Calendar API
+            event_body["attendees"] = [
+                attendee.model_dump(exclude_none=True) for attendee in event_data.attendees
+            ]
+        
+        # Debug: Print the event body being sent to API
+        print(f"Creating event with data: {event_body}")
         
         # Make API request with centralized error handling
         response = APIErrorHandler.make_google_api_request(
@@ -286,6 +321,7 @@ def create_event_service(token: str, event_data: EventCreate) -> EventResponse:
             location=data.get("location"),
             start=data.get("start"),
             end=data.get("end"),
+            attendees=data.get("attendees"),
             htmlLink=data.get("htmlLink"),
             created=data.get("created"),
             updated=data.get("updated"),
