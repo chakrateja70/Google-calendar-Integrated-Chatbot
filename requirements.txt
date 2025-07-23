@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+
+#DB Connection
+sqlalchemy
+dotenv
+mysql-connector-python
+aiomysql  
+
+#Calendar Integration
+google-api-python-client 
+google-auth-httplib2 
+google-auth-oauthlib
+
+#LLM Integration
+google-generativeai
