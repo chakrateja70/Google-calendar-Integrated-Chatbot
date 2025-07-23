@@ -157,50 +157,45 @@ Example prompts and expected parsing:
             if date_match:
                 target_date = datetime.fromisoformat(date_match.group(1)).date()
         
-        # Parse time ranges like "12PM to 3PM", "9 AM to 12 PM", "10-11AM"
-        time_range_pattern = r'(\d{1,2})(?::(\d{2}))?\s*(am|pm|AM|PM)?\s*(?:to|-)?\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm|AM|PM)'
+        # Parse time ranges like "12PM to 3PM", "12-3PM", "10-11AM"
+        time_range_pattern = r'(\d{1,2})(?::(\d{2}))?\s*(?:pm|am|PM|AM)?\s*(?:to|-)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm|AM|PM)?'
         match = re.search(time_range_pattern, time_expr)
         
         if match:
             start_hour = int(match.group(1))
             start_min = int(match.group(2)) if match.group(2) else 0
-            start_period = match.group(3).lower() if match.group(3) else None
-            end_hour = int(match.group(4))
-            end_min = int(match.group(5)) if match.group(5) else 0
-            end_period = match.group(6).lower() if match.group(6) else None
+            end_hour = int(match.group(3))
+            end_min = int(match.group(4)) if match.group(4) else 0
+            period = match.group(5).lower() if match.group(5) else None
             
-            # Handle AM/PM for start time
-            if start_period:
-                if start_period == 'pm' and start_hour != 12:
-                    start_hour += 12
-                elif start_period == 'am' and start_hour == 12:
-                    start_hour = 0
-            
-            # Handle AM/PM for end time
-            if end_period:
-                if end_period == 'pm' and end_hour != 12:
-                    end_hour += 12
-                elif end_period == 'am' and end_hour == 12:
-                    end_hour = 0
-            
-            # If start time has no period but end time does, infer start period
-            if not start_period and end_period:
-                # If end is PM and start hour is less than end hour, start is likely AM
-                # If end is AM and start hour is greater than end hour, start is likely PM (next day)
-                if end_period == 'pm' and start_hour < end_hour:
-                    # Start is likely AM, no conversion needed
-                    pass
-                elif end_period == 'am' and start_hour > end_hour:
-                    # Start is likely PM previous day
+            # Handle AM/PM for range times
+            if period:
+                if period == 'pm':
                     if start_hour != 12:
                         start_hour += 12
+                    if end_hour != 12 and end_hour < 12:
+                        end_hour += 12
+                elif period == 'am':
+                    if start_hour == 12:
+                        start_hour = 0
+                    if end_hour == 12:
+                        end_hour = 0
+            else:
+                # If no period specified, check for individual periods in the original expression
+                start_period_match = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(pm|am|PM|AM)', time_expr)
+                if start_period_match:
+                    start_period = start_period_match.group(3).lower()
+                    if start_period == 'pm' and start_hour != 12:
+                        start_hour += 12
+                    elif start_period == 'am' and start_hour == 12:
+                        start_hour = 0
+                
+                # For end time, if no explicit period, assume same as start for reasonable times
+                if start_hour >= 12 and end_hour < 12:  # PM start time
+                    end_hour += 12
             
             start_time = datetime.combine(target_date, datetime.min.time().replace(hour=start_hour, minute=start_min))
             end_time = datetime.combine(target_date, datetime.min.time().replace(hour=end_hour, minute=end_min))
-            
-            # If end time is before start time, assume end time is next day
-            if end_time <= start_time:
-                end_time = end_time + timedelta(days=1)
             
             # Return in ISO format compatible with Google Calendar API
             return start_time.strftime('%Y-%m-%dT%H:%M:%S'), end_time.strftime('%Y-%m-%dT%H:%M:%S')
@@ -417,56 +412,17 @@ Example prompts and expected parsing:
         
         # Default: Use meaningful words from the prompt, skip common words
         words = prompt.split()
-        skip_words = {'create', 'an', 'event', 'that', 'i', 'am', 'at', 'to', 'from', 'on', 'in', 'the', 'a', 'and', 'or', 'but', 'for'}
-        meaningful_words = []
-        
-        for word in words:
-            # Skip common words and time patterns
-            if (word.lower() not in skip_words and 
-                not re.match(r'\d+(?:pm|am|:\d+)', word.lower()) and
-                word.lower() not in ['exam', 'hall']):  # Skip location words that will be in location field
-                meaningful_words.append(word)
+        skip_words = {'create', 'an', 'event', 'that', 'i', 'am', 'at', 'to', 'from', 'on', 'in', 'the', 'a', 'and', 'or', 'but'}
+        meaningful_words = [word for word in words if word.lower() not in skip_words and not re.match(r'\d+(?:pm|am|:\d+)', word.lower())]
         
         if meaningful_words:
-            # Join meaningful words and clean up
-            summary = ' '.join(meaningful_words[:6]).replace('&', 'and').title()
-            
-            # Handle specific cases
-            if 'semester' in summary.lower():
-                # For semester exam, create better title
-                subject_words = []
-                for word in meaningful_words:
-                    if word.lower() not in ['semester', 'exam']:
-                        subject_words.append(word)
-                if subject_words:
-                    return f"{' '.join(subject_words[:3]).replace('&', 'and').title()} Semester Exam"
-                return "Semester Exam"
-            
-            return summary
+            return ' '.join(meaningful_words[:4]).title()
         else:
             return "Event"
 
     def _extract_description(self, prompt: str) -> Optional[str]:
         """Extract event description from prompt"""
         prompt_lower = prompt.lower()
-        
-        # Exam related
-        if 'exam' in prompt_lower:
-            if 'semester' in prompt_lower:
-                # Extract subject from prompt
-                words = prompt.split()
-                subject_words = []
-                for word in words:
-                    if (word.lower() not in ['create', 'event', 'for', 'my', 'semester', 'exam', 'from', 'to', 'in', 'am', 'pm', 'hall'] and
-                        not re.match(r'\d+', word) and
-                        not re.match(r'\d+(?:pm|am|:\d+)', word.lower())):
-                        subject_words.append(word)
-                
-                if subject_words:
-                    subject = ' '.join(subject_words[:3]).replace('&', 'and').title()
-                    return f"Semester examination for {subject}"
-                return "Semester examination"
-            return "Examination scheduled"
         
         # Travel/trip related
         if any(phrase in prompt_lower for phrase in ['going to', 'trip to', 'travel to', 'visiting']):
@@ -508,12 +464,11 @@ Example prompts and expected parsing:
             if destinations:
                 return destinations[0].strip().title()
         
-        # Look for specific location patterns for exams, meetings, etc.
+        # Look for common location indicators
         location_patterns = [
-            r'in\s+((?:exam\s+hall|conference\s+room|room|hall|auditorium|classroom|lab|laboratory)\s*\d*)', # Exam Hall 3, Room 101
-            r'at\s+([a-zA-Z\s]+?)(?:\s+(?:from|on|\d+\s*(?:am|pm))|\s*$)',  # General "at" pattern
-            r'in\s+([a-zA-Z\s]+?)(?:\s+(?:from|on|\d+\s*(?:am|pm))|\s*$)',  # General "in" pattern
-            r'(?:office|building|center|restaurant|cafe|hotel)\s+([a-zA-Z\s\d]+?)(?:\s+(?:at|from|on|\d)|\s*$)'  # Specific building types
+            r'at\s+([a-zA-Z\s]+?)(?:\s+(?:from|on|\d)|\s*$)',
+            r'in\s+([a-zA-Z\s]+?)(?:\s+(?:at|from|on|\d)|\s*$)',
+            r'(?:office|building|room|hall|center|restaurant|cafe|hotel)\s+([a-zA-Z\s\d]+?)(?:\s+(?:at|from|on|\d)|\s*$)'
         ]
         
         for pattern in location_patterns:
