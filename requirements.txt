@@ -1,11 +1,5 @@
-fastapi
-uvicorn
-
-#DB Connection
-sqlalchemy
-dotenv
-mysql-connector-python
-aiomysql  
+streamlit
+pandas
 
 #Calendar Integration
 google-api-python-client 
@@ -14,4 +8,11 @@ google-auth-oauthlib
 
 #LLM Integration
 google-generativeai
-streamlit
+
+# Optional: Keep these for local development
+fastapi
+uvicorn
+sqlalchemy
+python-dotenv
+mysql-connector-python
+aiomysql

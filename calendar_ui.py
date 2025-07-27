@@ -1,10 +1,330 @@
 import streamlit as st
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import pandas as pd
+import json
+import os
+from typing import Optional, Dict, Any, List
+
+# Import backend functionality
+import google.generativeai as genai
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 # --- CONFIG ---
-API_URL = "http://localhost:8000/chat"  # Adjust if backend runs elsewhere
+# Configure Gemini API with better error handling
+try:
+    GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY"))
+except Exception:
+    # Fallback to environment variable if secrets not available
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+else:
+    st.error("⚠️ GEMINI_API_KEY not found! Please configure it in .streamlit/secrets.toml or environment variables.")
+    st.info("Add this to `.streamlit/secrets.toml`: GEMINI_API_KEY = \"your_api_key_here\"")
+
+# Google Calendar Configuration
+SCOPES = ['https://www.googleapis.com/auth/calendar']
+CREDENTIALS_FILE = 'credentials.json'
+TOKEN_FILE = 'token.json'
+
+# --- BACKEND FUNCTIONS ---
+@st.cache_resource
+def get_google_credentials():
+    """Get Google Calendar credentials"""
+    creds = None
+    
+    # Check if we have stored credentials in Streamlit secrets
+    if "google_credentials" in st.secrets:
+        try:
+            creds_info = dict(st.secrets["google_credentials"])
+            creds = Credentials.from_authorized_user_info(creds_info, SCOPES)
+        except Exception as e:
+            st.error(f"Error loading credentials from secrets: {e}")
+    
+    # Check local token file
+    elif os.path.exists(TOKEN_FILE):
+        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+    
+    # If there are no (valid) credentials available, let the user log in
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                st.error(f"Error refreshing credentials: {e}")
+                creds = None
+        
+        if not creds:
+            st.error("Google Calendar authentication required. Please set up credentials.")
+            st.info("For deployment, add your Google credentials to Streamlit secrets.")
+            return None
+    
+    return creds
+
+def get_calendar_service():
+    """Get Google Calendar service"""
+    creds = get_google_credentials()
+    if not creds:
+        return None
+    
+    try:
+        return build("calendar", "v3", credentials=creds)
+    except Exception as e:
+        st.error(f"Failed to create Google Calendar service: {e}")
+        return None
+
+def parse_user_prompt(prompt: str) -> Dict[str, Any]:
+    """Parse user prompt using Gemini AI"""
+    if not GEMINI_API_KEY:
+        return {
+            "success": False,
+            "message": "Gemini AI not configured. Please add GEMINI_API_KEY to secrets.",
+            "action": "error"
+        }
+    
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        today = datetime.now().strftime("%Y-%m-%d")
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        
+        system_prompt = f"""
+You are a smart calendar assistant. Analyze the user prompt and return a JSON response with the action and extracted data.
+
+Current date/time: {current_time}
+Today: {today}
+Tomorrow: {tomorrow}
+
+Actions:
+- "create_event": Create/schedule/add new event
+- "get_events": List/show/view events
+- "delete_event": Delete/cancel/remove event
+- "update_event": Modify/change existing event
+
+For create_event, extract:
+- summary (title)
+- start_datetime (YYYY-MM-DD HH:MM format)
+- end_datetime (YYYY-MM-DD HH:MM format)
+- location
+- attendees (list of emails)
+- description
+
+For get_events, extract:
+- time_range (today, tomorrow, this_week, next_week, or specific date)
+- search_query (keywords to filter events)
+
+For delete_event, extract:
+- event_title (keywords from the event title)
+- event_date (specific date if mentioned)
+
+Return JSON only:
+{{
+    "action": "action_type",
+    "data": {{...extracted_data...}},
+    "success": true,
+    "message": "Brief confirmation message"
+}}
+
+User prompt: {prompt}
+"""
+        
+        response = model.generate_content(system_prompt)
+        result_text = response.text.strip()
+        
+        # Extract JSON from response
+        if result_text.startswith('```json'):
+            result_text = result_text[7:-3]
+        elif result_text.startswith('```'):
+            result_text = result_text[3:-3]
+        
+        return json.loads(result_text)
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Error parsing prompt: {str(e)}",
+            "action": "error"
+        }
+
+def create_calendar_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Create event in Google Calendar"""
+    service = get_calendar_service()
+    if not service:
+        return {"success": False, "message": "Calendar service not available"}
+    
+    try:
+        # Format the event data for Google Calendar API
+        event = {
+            'summary': event_data.get('summary', 'New Event'),
+            'description': event_data.get('description', ''),
+            'location': event_data.get('location', ''),
+            'start': {
+                'dateTime': event_data.get('start_datetime'),
+                'timeZone': 'Asia/Kolkata',
+            },
+            'end': {
+                'dateTime': event_data.get('end_datetime'),
+                'timeZone': 'Asia/Kolkata',
+            },
+        }
+        
+        # Add attendees if provided
+        if event_data.get('attendees'):
+            event['attendees'] = [{'email': email} for email in event_data['attendees']]
+        
+        # Create the event
+        created_event = service.events().insert(calendarId='primary', body=event).execute()
+        
+        return {
+            "success": True,
+            "message": "Event created successfully!",
+            "data": created_event,
+            "action_performed": "create_event"
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Failed to create event: {str(e)}",
+            "action_performed": "create_event"
+        }
+
+def get_calendar_events(filters: Dict[str, Any] = None) -> Dict[str, Any]:
+    """Get events from Google Calendar"""
+    service = get_calendar_service()
+    if not service:
+        return {"success": False, "message": "Calendar service not available"}
+    
+    try:
+        # Set time range
+        now = datetime.now().isoformat() + 'Z'
+        
+        if filters and filters.get('time_range') == 'tomorrow':
+            start_time = (datetime.now() + timedelta(days=1)).replace(hour=0, minute=0, second=0).isoformat() + 'Z'
+            end_time = (datetime.now() + timedelta(days=2)).replace(hour=0, minute=0, second=0).isoformat() + 'Z'
+        else:
+            start_time = now
+            end_time = (datetime.now() + timedelta(days=7)).isoformat() + 'Z'
+        
+        events_result = service.events().list(
+            calendarId='primary',
+            timeMin=start_time,
+            timeMax=end_time,
+            maxResults=50,
+            singleEvents=True,
+            orderBy='startTime'
+        ).execute()
+        
+        events = events_result.get('items', [])
+        
+        # Filter by search query if provided
+        if filters and filters.get('search_query'):
+            search_terms = filters['search_query'].lower()
+            events = [e for e in events if search_terms in e.get('summary', '').lower()]
+        
+        return {
+            "success": True,
+            "message": f"Found {len(events)} events",
+            "data": {"items": events},
+            "action_performed": "get_events"
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Failed to get events: {str(e)}",
+            "action_performed": "get_events"
+        }
+
+def delete_calendar_event(filters: Dict[str, Any]) -> Dict[str, Any]:
+    """Delete event from Google Calendar"""
+    service = get_calendar_service()
+    if not service:
+        return {"success": False, "message": "Calendar service not available"}
+    
+    try:
+        # First, find matching events
+        events_response = get_calendar_events(filters)
+        if not events_response["success"]:
+            return events_response
+        
+        events = events_response["data"]["items"]
+        
+        # Filter by title if provided
+        if filters.get('event_title'):
+            title_keywords = filters['event_title'].lower()
+            matching_events = [e for e in events if title_keywords in e.get('summary', '').lower()]
+        else:
+            matching_events = events
+        
+        if len(matching_events) == 0:
+            return {
+                "success": False,
+                "message": "No matching events found to delete",
+                "action_performed": "delete_event"
+            }
+        elif len(matching_events) > 1:
+            return {
+                "success": False,
+                "message": "Found multiple matching events. Please be more specific:",
+                "data": matching_events,
+                "action_performed": "delete_event"
+            }
+        else:
+            # Delete the event
+            event_to_delete = matching_events[0]
+            service.events().delete(calendarId='primary', eventId=event_to_delete['id']).execute()
+            
+            return {
+                "success": True,
+                "message": f"Successfully deleted event: {event_to_delete.get('summary')}",
+                "action_performed": "delete_event"
+            }
+            
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"Failed to delete event: {str(e)}",
+            "action_performed": "delete_event"
+        }
+
+def process_chat_request(prompt: str) -> Dict[str, Any]:
+    """Main function to process chat requests"""
+    # Parse the user prompt
+    parsed_result = parse_user_prompt(prompt)
+    
+    if not parsed_result.get("success"):
+        return parsed_result
+    
+    action = parsed_result.get("action")
+    data = parsed_result.get("data", {})
+    
+    # Execute the appropriate action
+    if action == "create_event":
+        return create_calendar_event(data)
+    elif action == "get_events":
+        return get_calendar_events(data)
+    elif action == "delete_event":
+        return delete_calendar_event(data)
+    elif action == "update_event":
+        return {
+            "success": False,
+            "message": "Update functionality not implemented yet",
+            "action_performed": "update_event"
+        }
+    else:
+        return {
+            "success": False,
+            "message": "I didn't understand what you want to do. Please try rephrasing your request.",
+            "action_performed": "unknown"
+        }
 
 # --- SIDEBAR: Project Info & Quick Help ---
 st.sidebar.title("📅 Calendar Integration AI")
@@ -14,30 +334,32 @@ st.sidebar.markdown("""
 - 📅 Google Calendar integration (read/write)
 - 🗣️ Create, view, delete events with plain English
 - 🔐 Secure Google OAuth2 authentication
-- 🌐 RESTful API backend (FastAPI)
+- ☁️ Fully deployed on Streamlit Cloud
 
 **Tech Stack:**
-- FastAPI (Python)
+- Streamlit (UI + Backend)
 - Google Gemini AI
 - Google Calendar API v3
-- Streamlit (UI)
+- Python
 
 **How to Use:**
-1. Start the FastAPI backend (`uvicorn main:app --reload`)
-2. Run this UI (`streamlit run calendar_ui.py`)
-3. Enter natural language commands below
+1. Ensure Google credentials are configured
+2. Enter natural language commands below
+3. AI will understand and execute your requests
 
 **Authentication:**
-- On first use, a Google login window will open
-- Grant calendar permissions
-- Token is saved for future use
+- Credentials should be configured in Streamlit secrets
+- For local development, place `credentials.json` in project root
 
 **Troubleshooting:**
-- Missing credentials? Place `credentials.json` in project root
-- Auth errors? Delete `token.json` and re-authenticate
-- API quota? Check Google Cloud Console
+- Missing credentials? Check Streamlit secrets configuration
+- Auth errors? Verify Google Calendar API permissions
+- AI not working? Check GEMINI_API_KEY in secrets
 
-[API Docs](http://localhost:8000/docs)
+**Examples:**
+- "Schedule meeting tomorrow 2 PM"
+- "Show my events for tomorrow"
+- "Delete interview with John"
 """)
 
 # --- PAGE SETUP ---
@@ -217,13 +539,9 @@ def display_response(resp):
 if send_btn and user_input.strip():
     with st.spinner("Processing..."):
         try:
-            payload = {"prompt": user_input.strip()}
-            r = requests.post(API_URL, json=payload, timeout=30)
-            if r.status_code == 200:
-                resp = r.json()
-                st.session_state.chat_history.append((user_input, resp))
-            else:
-                st.session_state.chat_history.append((user_input, {"success": False, "message": f"API error: {r.status_code} {r.text}"}))
+            # Use integrated backend instead of API call
+            resp = process_chat_request(user_input.strip())
+            st.session_state.chat_history.append((user_input, resp))
         except Exception as e:
             st.session_state.chat_history.append((user_input, {"success": False, "message": f"Request failed: {e}"}))
     st.rerun()
