@@ -34,38 +34,93 @@ CREDENTIALS_FILE = 'credentials.json'
 TOKEN_FILE = 'token.json'
 
 # --- BACKEND FUNCTIONS ---
+def authenticate_google_calendar():
+    """Authenticate with Google Calendar and store credentials"""
+    if not os.path.exists(CREDENTIALS_FILE):
+        return False, "credentials.json file not found. Please download it from Google Cloud Console."
+    
+    try:
+        flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
+        # Use run_local_server for authentication
+        creds = flow.run_local_server(port=8080, access_type='offline', prompt='consent')
+        
+        # Save the credentials for the next run
+        with open(TOKEN_FILE, 'w') as token:
+            token.write(creds.to_json())
+        
+        # Also store in session state
+        st.session_state.google_credentials = creds
+        
+        return True, "Successfully authenticated with Google Calendar!"
+    except Exception as e:
+        return False, f"Authentication failed: {str(e)}"
+
+def check_google_auth_status():
+    """Check if user is authenticated with Google Calendar"""
+    # Check session state first
+    if 'google_credentials' in st.session_state:
+        creds = st.session_state.google_credentials
+        if creds and creds.valid:
+            return True
+    
+    # Check token file
+    if os.path.exists(TOKEN_FILE):
+        try:
+            creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+            if creds and creds.valid:
+                st.session_state.google_credentials = creds
+                return True
+            elif creds and creds.expired and creds.refresh_token:
+                try:
+                    creds.refresh(Request())
+                    # Update token file
+                    with open(TOKEN_FILE, 'w') as token:
+                        token.write(creds.to_json())
+                    st.session_state.google_credentials = creds
+                    return True
+                except Exception:
+                    return False
+        except Exception:
+            return False
+    
+    return False
+
 @st.cache_resource
 def get_google_credentials():
     """Get Google Calendar credentials"""
-    creds = None
+    # Check session state first
+    if 'google_credentials' in st.session_state:
+        return st.session_state.google_credentials
     
     # Check if we have stored credentials in Streamlit secrets
     if "google_credentials" in st.secrets:
         try:
             creds_info = dict(st.secrets["google_credentials"])
             creds = Credentials.from_authorized_user_info(creds_info, SCOPES)
+            if creds and creds.valid:
+                return creds
         except Exception as e:
             st.error(f"Error loading credentials from secrets: {e}")
     
     # Check local token file
-    elif os.path.exists(TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-    
-    # If there are no (valid) credentials available, let the user log in
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-            except Exception as e:
-                st.error(f"Error refreshing credentials: {e}")
-                creds = None
-        
-        if not creds:
-            st.error("Google Calendar authentication required. Please set up credentials.")
-            st.info("For deployment, add your Google credentials to Streamlit secrets.")
+    if os.path.exists(TOKEN_FILE):
+        try:
+            creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+            if creds and creds.valid:
+                return creds
+            elif creds and creds.expired and creds.refresh_token:
+                try:
+                    creds.refresh(Request())
+                    # Update token file
+                    with open(TOKEN_FILE, 'w') as token:
+                        token.write(creds.to_json())
+                    return creds
+                except Exception:
+                    return None
+        except Exception:
             return None
     
-    return creds
+    return None
 
 def get_calendar_service():
     """Get Google Calendar service"""
@@ -404,13 +459,7 @@ with st.expander("💡 Example prompts", expanded=False):
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []  # List of (user, assistant) tuples
 
-# --- CHAT INPUT ---
-st.markdown("---")
-st.markdown("#### Enter your calendar command:")
-user_input = st.text_input("", "", key="user_input")
-send_btn = st.button("Send", type="primary")
-
-# --- HANDLE CHAT SUBMISSION ---
+# --- DISPLAY FUNCTIONS ---
 def display_event_details(event):
     """Display a single event's important details in a clean format."""
     st.markdown(f"**Title:** {event.get('summary', '(No title)')}")
@@ -430,7 +479,6 @@ def display_event_details(event):
     link = event.get('htmlLink', None)
     if link:
         st.markdown(f"[View in Google Calendar]({link})")
-
 
 def display_events_table(events):
     """Display multiple events in a table format."""
@@ -471,7 +519,6 @@ def display_events_table(events):
     
     # Add a note about viewing individual events
     st.caption(f"📋 Showing {len(events)} event(s). Click on any row to expand details if needed.")
-
 
 def display_response(resp):
     """Display the assistant's response in a structured, minimal way."""
@@ -535,23 +582,96 @@ def display_response(resp):
             else:
                 display_event_details(data["items"][0])
 
-# --- MAIN CHAT LOGIC ---
-if send_btn and user_input.strip():
-    with st.spinner("Processing..."):
-        try:
-            # Use integrated backend instead of API call
-            resp = process_chat_request(user_input.strip())
-            st.session_state.chat_history.append((user_input, resp))
-        except Exception as e:
-            st.session_state.chat_history.append((user_input, {"success": False, "message": f"Request failed: {e}"}))
-    st.rerun()
+# --- GOOGLE CALENDAR AUTHENTICATION ---
+st.markdown("---")
+st.markdown("### 🔐 Google Calendar Authentication")
 
-# --- DISPLAY CHAT HISTORY ---
-if st.session_state.chat_history:
+# Check authentication status
+is_authenticated = check_google_auth_status()
+
+if is_authenticated:
+    st.success("✅ Connected to Google Calendar")
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.info("You can now use calendar commands!")
+    with col2:
+        if st.button("🔄 Re-authenticate", help="Click to re-authenticate with Google Calendar"):
+            # Clear existing credentials
+            if os.path.exists(TOKEN_FILE):
+                os.remove(TOKEN_FILE)
+            if 'google_credentials' in st.session_state:
+                del st.session_state.google_credentials
+            st.rerun()
+else:
+    st.warning("⚠️ Google Calendar not connected")
+    
+    # Check if credentials.json exists
+    if not os.path.exists(CREDENTIALS_FILE):
+        st.error("📄 `credentials.json` file not found!")
+        st.markdown("""
+        **To set up Google Calendar authentication:**
+        1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+        2. Create a project and enable Google Calendar API
+        3. Create OAuth 2.0 credentials (Desktop application)
+        4. Download the credentials as `credentials.json`
+        5. Place the file in your project root directory
+        """)
+    else:
+        st.info("📄 `credentials.json` found! Click below to authenticate:")
+        
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            auth_button = st.button("🔑 Authenticate Google Calendar", type="primary")
+        with col2:
+            st.caption("This will open a browser window for Google authentication")
+        
+        if auth_button:
+            with st.spinner("Starting authentication process..."):
+                success, message = authenticate_google_calendar()
+                if success:
+                    st.success(message)
+                    st.balloons()
+                    st.rerun()
+                else:
+                    st.error(message)
+
+# Only show chat interface if authenticated
+if is_authenticated:
+    # --- CHAT INPUT ---
     st.markdown("---")
-    st.markdown("### Conversation History")
-    # Show only the last 2 exchanges
-    for user, resp in reversed(st.session_state.chat_history[-2:]):
-        st.markdown(f"**You:** {user}")
-        display_response(resp)
-        st.markdown("---") 
+    st.markdown("#### Enter your calendar command:")
+    user_input = st.text_input("", "", key="user_input")
+    send_btn = st.button("Send", type="primary")
+    
+    # --- MAIN CHAT LOGIC ---
+    if send_btn and user_input.strip():
+        with st.spinner("Processing..."):
+            try:
+                # Use integrated backend instead of API call
+                resp = process_chat_request(user_input.strip())
+                st.session_state.chat_history.append((user_input, resp))
+            except Exception as e:
+                st.session_state.chat_history.append((user_input, {"success": False, "message": f"Request failed: {e}"}))
+        st.rerun()
+    
+    # --- DISPLAY CHAT HISTORY ---
+    if st.session_state.chat_history:
+        st.markdown("---")
+        st.markdown("### Conversation History")
+        # Show only the last 2 exchanges
+        for user, resp in reversed(st.session_state.chat_history[-2:]):
+            st.markdown(f"**You:** {user}")
+            display_response(resp)
+            st.markdown("---")
+
+else:
+    # Show message when not authenticated
+    st.markdown("---")
+    st.info("🔒 Please authenticate with Google Calendar first to use the chat interface.")
+    st.markdown("""
+    **Once authenticated, you can:**
+    - 📅 Create events: "Schedule meeting tomorrow 2 PM"
+    - 👀 View events: "Show my tomorrow events"  
+    - 🗑️ Delete events: "Delete interview with John"
+    - ✏️ Update events: "Change meeting time to 3 PM"
+    """) 
