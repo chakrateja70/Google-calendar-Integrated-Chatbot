@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, Query, HTTPException
-from datetime import datetime
+from datetime import datetime, timedelta
 from app.core.calendar_auth import get_google_credentials
 from app.services.google_calendar import (
     get_calendar_ids_service, list_events_service, create_event_service, delete_event_service
@@ -110,10 +110,44 @@ def chat_endpoint(
             try:
                 # Call the existing list events service
                 events_response = list_events_service(token)
-                # Convert Pydantic model to dict
+                events = events_response.items
+                # Filtering logic for today, tomorrow, or date range
+                filtered_events = events
+                pd = llm_response.parsed_data
+                if pd:
+                    # Handle 'today' and 'tomorrow' or specific date
+                    if pd.date:
+                        try:
+                            target_date = datetime.fromisoformat(pd.date).date()
+                            filtered_events = [
+                                e for e in events
+                                if (
+                                    (e.start.get("dateTime") and datetime.fromisoformat(e.start["dateTime"].replace("Z", "+00:00")).date() == target_date)
+                                    or (e.start.get("date") and datetime.fromisoformat(e.start["date"]).date() == target_date)
+                                )
+                            ]
+                        except Exception:
+                            pass
+                    # Handle date range if both start_time and end_time are present and are dates
+                    elif pd.start_time and pd.end_time:
+                        try:
+                            start = datetime.fromisoformat(pd.start_time).date()
+                            end = datetime.fromisoformat(pd.end_time).date()
+                            filtered_events = [
+                                e for e in events
+                                if (
+                                    (e.start.get("dateTime") and start <= datetime.fromisoformat(e.start["dateTime"].replace("Z", "+00:00")).date() <= end)
+                                    or (e.start.get("date") and start <= datetime.fromisoformat(e.start["date"]).date() <= end)
+                                )
+                            ]
+                        except Exception:
+                            pass
+                # If no date or range specified, filtered_events remains as all events
+                events_response.items = filtered_events
+                events_response.count = len(filtered_events)
                 api_response = events_response.dict() if hasattr(events_response, 'dict') else events_response.__dict__
                 success = True
-                message = "Here are your upcoming events"
+                message = "Here are your filtered events" if filtered_events != events else "Here are your upcoming events"
             except Exception as e:
                 success = False
                 message = f"Failed to retrieve events: {str(e)}"

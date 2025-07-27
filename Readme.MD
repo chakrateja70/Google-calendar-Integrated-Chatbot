@@ -170,3 +170,22 @@ This project is licensed under the MIT License.
 - [ ] Support for multiple calendars
 - [ ] Event filtering and search
 - [ ] Webhook support for real-time updates
+
+## 🖥️ Streamlit UI (Optional)
+
+A simple web UI is available for natural language calendar management.
+
+### How to Run
+
+1. Make sure the FastAPI backend is running (see above).
+2. Install Streamlit if you haven't:
+   ```bash
+   pip install streamlit
+   ```
+3. Run the UI:
+   ```bash
+   streamlit run calendar_ui.py
+   ```
+4. The UI will open in your browser. Interact with your calendar using natural language!
+
+- By default, the UI expects the backend at `http://localhost:8000`. To change this, add an `API_URL` entry to your `.streamlit/secrets.toml` file.

@@ -18,9 +18,9 @@ class LLMService:
     def __init__(self):
         self.model = genai.GenerativeModel('gemini-1.5-flash')
         
-    def _get_system_prompt(self) -> str:
+    def _get_system_prompt(self, current_datetime: str, today_date: str, tomorrow_date: str) -> str:
         """Get the system prompt for LLM data extraction"""
-        return """
+        return f"""
 You are a smart calendar assistant. Your task is to analyze user prompts and determine the action they want to perform, then extract relevant event data.
 
 First, determine the action:
@@ -45,83 +45,91 @@ If the action is "update_event" or "delete_event", extract:
 - date: Specific date mentioned (YYYY-MM-DD format) - ALWAYS extract when "today", "tomorrow", or specific dates are mentioned
 - Any other identifying information from the prompt
 
-IMPORTANT FOR DELETE/UPDATE ACTIONS:
+If the action is "get_events":
+- If the user mentions "today", "tomorrow", a specific date, or a date range (e.g., "between July 25 and July 30"), ALWAYS extract the date (or date range) in parsed_data as:
+  - date: for a single day (YYYY-MM-DD)
+  - start_time and end_time: for a date range (YYYY-MM-DD or ISO format)
+- If the user does NOT mention any date or range, set parsed_data to null.
+
+IMPORTANT FOR ALL ACTIONS INVOLVING DATES AND TIMES:
 - When user mentions "today", ALWAYS set date to today's date
 - When user mentions "tomorrow", ALWAYS set date to tomorrow's date
 - When user mentions "yesterday", ALWAYS set date to yesterday's date
 - When user mentions specific dates, convert them to YYYY-MM-DD format
 - When user mentions times (like "10 AM"), combine with the date to create start_time
-- Date filtering is CRITICAL for accurate event identification when multiple events have similar titles
+- Date and time filtering is CRITICAL for accurate event identification when multiple events have similar titles
 
 For time parsing:
 - Always interpret times in the user's local timezone (Asia/Kolkata) unless explicitly stated otherwise
 - If only time is given (like "10 AM"), assume today's date unless "tomorrow" or specific date is mentioned
-- If "tomorrow" is mentioned, use tomorrow's date (2025-07-28)
+- If "tomorrow" is mentioned, use tomorrow's date ({tomorrow_date})
 - Support both 12-hour (10 AM, 2 PM) and 24-hour (14:00) formats
 - If no end time specified, assume 1 hour duration
 - Always format datetime as YYYY-MM-DDTHH:MM:SS (local time, NOT UTC)
 - Always set timezone as "Asia/Kolkata" unless user specifies otherwise
 - Examples:
-  - "10 AM tomorrow" → start_time: "2025-07-28T10:00:00", timezone: "Asia/Kolkata"
-  - "2 PM to 3 PM today" → start_time: "2025-07-27T14:00:00", end_time: "2025-07-27T15:00:00"
+  - "10 AM tomorrow" → start_time: "{tomorrow_date}T10:00:00", timezone: "Asia/Kolkata"
+  - "2 PM to 3 PM today" → start_time: "{today_date}T14:00:00", end_time: "{today_date}T15:00:00"
 
-For get_events actions, set parsed_data to null.
-For update_event and delete_event actions, extract event identification data in parsed_data.
-
-Current date and time: {current_time} (Asia/Kolkata timezone)
-Today's date: 2025-07-27
-Tomorrow's date: 2025-07-28
+Current date and time: {current_datetime} (Asia/Kolkata timezone)
+Today's date: {today_date}
+Tomorrow's date: {tomorrow_date}
 
 Return ONLY a valid JSON response in this exact format:
-{{
+{{{{
   "action": "create_event|get_events|update_event|delete_event|unknown",
   "confidence": 0.0-1.0,
-  "parsed_data": {{
+  "parsed_data": {{{{
     "summary": "event title",
     "description": "event description", 
-    "start_time": "2025-07-27T10:00:00",
-    "end_time": "2025-07-27T11:00:00",
+    "start_time": "{today_date}T10:00:00",
+    "end_time": "{today_date}T11:00:00",
+    "date": "{today_date}",
     "timezone": "Asia/Kolkata",
     "location": "location",
     "attendees": [
-      {{
+      {{{{
         "name": "John Doe",
         "email": "john@example.com"
-      }}
+      }}}}
     ]
-  }} OR null,
+  }}}} OR null,
   "reasoning": "explanation of decision",
   "endpoint": "/create-event|/listevents|/update-event|/delete-event",
   "method": "POST|GET|PUT|POST"
-}}
+}}}}
 
 Note: delete_event uses POST method with event_id in request body.
 
 Example:
-User: "Schedule an interview with Jagadish (tamaranajagadeesh555@gmail.com) tomorrow from 10 AM to 11 AM in Hyderabad."
+User: "Show all my today events."
 
 Response:
-{{
-  "action": "create_event",
-  "confidence": 0.95,
-  "parsed_data": {{
-    "summary": "Interview with Jagadish",
-    "description": "Interview session with Jagadish",
-    "start_time": "2025-07-28T10:00:00",
-    "end_time": "2025-07-28T11:00:00",
-    "timezone": "Asia/Kolkata",
-    "location": "Hyderabad",
-    "attendees": [
-      {{
-        "name": "Jagadish",
-        "email": "tamaranajagadeesh555@gmail.com"
-      }}
-    ]
-  }},
-  "reasoning": "User wants to schedule a new interview event with specific time, location, and attendee",
-  "endpoint": "/create-event",
-  "method": "POST"
-}}
+{{{{
+  "action": "get_events",
+  "confidence": 1.0,
+  "parsed_data": {{{{
+    "date": "{today_date}"
+  }}}},
+  "reasoning": "User wants to see all events for today.",
+  "endpoint": "/listevents",
+  "method": "GET"
+}}}}
+
+User: "Show all events between July 25 and July 30."
+
+Response:
+{{{{
+  "action": "get_events",
+  "confidence": 1.0,
+  "parsed_data": {{{{
+    "start_time": "2025-07-25",
+    "end_time": "2025-07-30"
+  }}}},
+  "reasoning": "User wants to see all events in the specified date range.",
+  "endpoint": "/listevents",
+  "method": "GET"
+}}}}
         """
 
     def parse_user_prompt(self, prompt: str) -> LLMResponse:
@@ -129,8 +137,12 @@ Response:
         try:
             # Get current time in Asia/Kolkata timezone
             ist_tz = timezone(timedelta(hours=5, minutes=30))
-            current_time = datetime.now(ist_tz).isoformat()
-            system_prompt = self._get_system_prompt().format(current_time=current_time)
+            current_time = datetime.now(ist_tz)
+            current_datetime_str = current_time.isoformat()
+            today_date = current_time.date().isoformat()
+            tomorrow_date = (current_time.date() + timedelta(days=1)).isoformat()
+            
+            system_prompt = self._get_system_prompt(current_datetime_str, today_date, tomorrow_date)
             
             full_prompt = f"{system_prompt}\n\nUser prompt: {prompt}"
             

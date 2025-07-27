@@ -14,3 +14,4 @@ google-auth-oauthlib
 
 #LLM Integration
 google-generativeai
+streamlit
