@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from app.core.exceptions import (
     AuthenticationError, AuthorizationError, ResourceNotFoundError,
     RateLimitError, RequestTimeoutError, ServiceUnavailableError,
-    BadRequestError, InternalServerError
+    BadRequestError, InternalServerError, ResourceGoneError
 )
 from app.core.status_codes import HTTPStatus, ErrorMessages, GoogleCalendarAPIMessages
 
@@ -29,7 +29,15 @@ class HTTPErrorHandler:
         Raises:
             Various CalendarAPIException subclasses based on status code
         """
-        if response.status_code == HTTPStatus.OK.value:
+        # Success status codes - 200 OK, 201 Created, 202 Accepted, 204 No Content
+        success_codes = [
+            HTTPStatus.OK.value,           # 200 - Standard success
+            HTTPStatus.CREATED.value,      # 201 - Resource created
+            HTTPStatus.ACCEPTED.value,     # 202 - Request accepted 
+            HTTPStatus.NO_CONTENT.value    # 204 - Success with no content (typical for DELETE)
+        ]
+        
+        if response.status_code in success_codes:
             return  # Success, no error handling needed
             
         # Create error detail with context
@@ -85,6 +93,19 @@ class HTTPErrorHandler:
                 error_message = "The requested resource could not be found"
             
             raise ResourceNotFoundError(
+                detail=error_detail,
+                error_message=error_message
+            )
+            
+        elif response.status_code == HTTPStatus.GONE.value:
+            if "event" in operation_context.lower():
+                error_detail += ErrorMessages.EVENT_ALREADY_DELETED
+                error_message = "The event has already been deleted"
+            else:
+                error_detail += ErrorMessages.RESOURCE_DELETED
+                error_message = "The requested resource has been deleted"
+            
+            raise ResourceGoneError(
                 detail=error_detail,
                 error_message=error_message
             )
@@ -147,6 +168,7 @@ class APIErrorHandler:
         headers: Dict[str, str],
         method: str = "GET",
         json_data: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
         timeout: int = 30,
         operation_context: str = "Google Calendar API request"
     ) -> requests.Response:
@@ -158,6 +180,7 @@ class APIErrorHandler:
             headers (Dict[str, str]): Request headers
             method (str): HTTP method (GET, POST, PUT, DELETE)
             json_data (Optional[Dict[str, Any]]): JSON data for POST/PUT requests
+            params (Optional[Dict[str, Any]]): Query parameters
             timeout (int): Request timeout in seconds
             operation_context (str): Context about the operation
             
@@ -170,13 +193,13 @@ class APIErrorHandler:
         try:
             # Make the HTTP request
             if method.upper() == "GET":
-                response = requests.get(url, headers=headers, timeout=timeout)
+                response = requests.get(url, headers=headers, params=params, timeout=timeout)
             elif method.upper() == "POST":
-                response = requests.post(url, headers=headers, json=json_data, timeout=timeout)
+                response = requests.post(url, headers=headers, json=json_data, params=params, timeout=timeout)
             elif method.upper() == "PUT":
-                response = requests.put(url, headers=headers, json=json_data, timeout=timeout)
+                response = requests.put(url, headers=headers, json=json_data, params=params, timeout=timeout)
             elif method.upper() == "DELETE":
-                response = requests.delete(url, headers=headers, timeout=timeout)
+                response = requests.delete(url, headers=headers, params=params, timeout=timeout)
             else:
                 raise InternalServerError(
                     detail=f"Unsupported HTTP method: {method}",

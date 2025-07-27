@@ -1,22 +1,42 @@
 from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any, Literal
+from typing import Optional, Dict, Any, Literal, List
 from enum import Enum
 
 class ActionType(str, Enum):
     """Enum for different action types the LLM can identify"""
     CREATE_EVENT = "create_event"
     UPDATE_EVENT = "update_event"
+    DELETE_EVENT = "delete_event"
     GET_EVENTS = "get_events"
     UNKNOWN = "unknown"
 
+class AttendeeData(BaseModel):
+    """Model for attendee information"""
+    name: str = Field(..., description="Attendee name")
+    email: str = Field(..., description="Attendee email address")
+
 class LLMPromptRequest(BaseModel):
     """Model for incoming user prompt requests"""
-    prompt: str = Field(..., description="Natural language prompt from user", max_length=2048)
+    prompt: str = Field(
+        ..., 
+        description="Natural language prompt from user", 
+        max_length=2048,
+        examples=[
+            "Schedule an interview with Jagadish (tamaranajagadeesh555@gmail.com) tomorrow from 10 AM to 11 AM in Hyderabad",
+            "Create an event for 10-11AM I'm in 11th class",
+            "Show me my events for today",
+            "Book a meeting with John from 2-3PM on Friday in Conference Room A",
+            "Update my interview tomorrow to 2PM",
+            "Delete my team meeting on July 28",
+            "Cancel the testing integration today",
+            "Reschedule my appointment to next week"
+        ]
+    )
     
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
-                "prompt": "Create an event for 10-11AM I'm in 11th class"
+                "prompt": "Schedule an interview with Jagadish (tamaranajagadeesh555@gmail.com) tomorrow from 10 AM to 11 AM in Hyderabad"
             }
         }
 
@@ -30,6 +50,7 @@ class ParsedEventData(BaseModel):
     date: Optional[str] = Field(None, description="Date in YYYY-MM-DD format for all-day events")
     timezone: Optional[str] = Field(None, description="Timezone")
     event_id: Optional[str] = Field(None, description="Event ID for updates")
+    attendees: Optional[List[AttendeeData]] = Field(None, description="List of event attendees")
 
 class LLMResponse(BaseModel):
     """Model for LLM parsing response"""
@@ -83,4 +104,77 @@ class LLMFinalResponse(BaseModel):
                     }
                 }
             }
+        }
+
+class ChatResponse(BaseModel):
+    """Model for chat endpoint response matching other endpoint formats"""
+    kind: str = Field(default="calendar#chat", description="Resource type")
+    success: bool = Field(..., description="Whether the operation was successful")
+    message: str = Field(..., description="Human-readable response message")
+    action_performed: str = Field(..., description="Action that was performed")
+    confidence: float = Field(..., description="LLM confidence score", ge=0, le=1)
+    reasoning: str = Field(..., description="LLM reasoning for the decision")
+    data: Optional[Dict[Any, Any]] = Field(None, description="Response data from executed operation")
+    timestamp: str = Field(..., description="Response timestamp in ISO format")
+    
+    class Config:
+        json_schema_extra = {
+            "examples": [
+                {
+                    "kind": "calendar#chat",
+                    "success": True,
+                    "message": "Successfully created event: Interview with Jagadish with attendees: Jagadish",
+                    "action_performed": "create_event",
+                    "confidence": 0.95,
+                    "reasoning": "User wants to schedule a new interview event with specific time, location, and attendee",
+                    "data": {
+                        "id": "abc123def456ghi789",
+                        "summary": "Interview with Jagadish",
+                        "description": "Interview session with Jagadish",
+                        "location": "Hyderabad",
+                        "start": {
+                            "dateTime": "2025-07-28T10:00:00",
+                            "timeZone": "Asia/Kolkata"
+                        },
+                        "end": {
+                            "dateTime": "2025-07-28T11:00:00", 
+                            "timeZone": "Asia/Kolkata"
+                        },
+                        "attendees": [
+                            {
+                                "email": "tamaranajagadeesh555@gmail.com",
+                                "displayName": "Jagadish",
+                                "responseStatus": "needsAction"
+                            }
+                        ],
+                        "htmlLink": "https://www.google.com/calendar/event?eid=abc123def456ghi789",
+                        "created": "2025-07-27T12:30:00Z",
+                        "updated": "2025-07-27T12:30:00Z",
+                        "status": "confirmed"
+                    },
+                    "timestamp": "2025-07-27T12:30:00Z"
+                },
+                {
+                    "kind": "calendar#chat",
+                    "success": True,
+                    "message": "Here are your upcoming events",
+                    "action_performed": "get_events",
+                    "confidence": 0.98,
+                    "reasoning": "User wants to view their calendar events",
+                    "data": {
+                        "kind": "calendar#events",
+                        "items": [
+                            {
+                                "id": "event123",
+                                "summary": "Team Meeting",
+                                "start": {"dateTime": "2025-07-28T14:00:00Z"},
+                                "end": {"dateTime": "2025-07-28T15:00:00Z"}
+                            }
+                        ],
+                        "count": 1,
+                        "message": "Events retrieved successfully"
+                    },
+                    "timestamp": "2025-07-27T12:30:00Z"
+                }
+            ]
         }

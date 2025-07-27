@@ -8,7 +8,7 @@ from app.models.event_models import (
     DefaultReminder, CalendarListItem, EventCreate, EventResponse
 )
 from app.utils.error_handler import APIErrorHandler, create_success_response
-from app.core.exceptions import InternalServerError, ResourceNotFoundError
+from app.core.exceptions import InternalServerError, ResourceNotFoundError, ResourceGoneError
 from app.core.status_codes import ErrorMessages, GoogleCalendarAPIMessages
 
 def get_calendar_service():
@@ -337,4 +337,66 @@ def create_event_service(token: str, event_data: EventCreate) -> EventResponse:
         raise InternalServerError(
             detail=GoogleCalendarAPIMessages.EVENT_CREATION_FAILED.format(str(e)),
             error_message="Failed to create calendar event"
+        )
+
+
+def delete_event_service(token: str, event_id: str, send_updates: str = "all") -> dict:
+    """
+    Delete an event from Google Calendar using REST API
+    
+    Args:
+        token (str): Google OAuth access token
+        event_id (str): ID of the event to delete
+        send_updates (str): Guests who should receive notifications about the deletion.
+                          Options: "all", "externalOnly", "none" (default: "all")
+    
+    Returns:
+        dict: Success response with deletion confirmation
+    """
+    try:
+        # Build the URL and headers
+        url = f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json"
+        }
+        
+        # Add query parameters - always send the parameter since we have a default
+        params = {"sendUpdates": send_updates}
+        
+        # Make API request with centralized error handling
+        response = APIErrorHandler.make_google_api_request(
+            url=url,
+            headers=headers,
+            method="DELETE",
+            params=params,
+            timeout=30,
+            operation_context="Delete event"
+        )
+        
+        # Debug: Log the response status code
+        print(f"Delete event response status: {response.status_code}")
+        
+        # Google Calendar API returns 204 No Content on successful deletion
+        # Return a success response
+        return {
+            "message": ErrorMessages.EVENT_DELETED_SUCCESS,
+            "eventId": event_id,
+            "deleted": True
+        }
+        
+    except ResourceGoneError:
+        # Event is already deleted - return success response
+        return {
+            "message": "Event was already deleted",
+            "eventId": event_id,
+            "deleted": True
+        }
+    except HTTPException:
+        # Re-raise HTTPExceptions as they are already properly formatted
+        raise
+    except Exception as e:
+        raise InternalServerError(
+            detail=GoogleCalendarAPIMessages.EVENT_DELETION_FAILED.format(str(e)),
+            error_message="Failed to delete calendar event"
         )

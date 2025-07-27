@@ -1,13 +1,11 @@
 import google.generativeai as genai
 import json
-import re
 import os
-from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
+from datetime import datetime, timezone, timedelta
+from typing import Optional, Dict, Any, List
 from fastapi import HTTPException
 from app.models.llm_models import LLMResponse, ParsedEventData, ActionType
-from app.models.event_models import EventCreate, EventUpdate, EventDateTime
-from app.services.google_calendar import create_event, update_event, list_upcoming_events
+import difflib
 
 # Configure Gemini API
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -21,223 +19,125 @@ class LLMService:
         self.model = genai.GenerativeModel('gemini-1.5-flash')
         
     def _get_system_prompt(self) -> str:
-        """Get the system prompt for LLM with endpoint descriptions"""
+        """Get the system prompt for LLM data extraction"""
         return """
-You are a smart calendar assistant that parses natural language requests and determines the appropriate calendar action.
+You are a smart calendar assistant. Your task is to analyze user prompts and determine the action they want to perform, then extract relevant event data.
 
-Available endpoints and their purposes:
-1. GET /events - Retrieve upcoming calendar events
-   - Use when: user wants to see, list, check, view, or get their events/schedule
-   - Examples: "show my events", "what's on my calendar", "list my meetings"
-   - No parsed_data needed for this action
+First, determine the action:
+- "create_event": User wants to create/add/schedule/book a new event
+- "get_events": User wants to see/list/view/check their calendar events  
+- "update_event": User wants to modify/change/update an existing event
+- "delete_event": User wants to delete/cancel/remove an existing event
+- "unknown": Unable to determine the intent
 
-2. POST /events - Create a new calendar event  
-   - Use when: user wants to create, add, schedule, book, or make a new event
-   - Examples: "create meeting", "schedule appointment", "add event", "book time"
-   - Required in parsed_data: summary (title), start_time, end_time
-   - Optional in parsed_data: description, location, timezone
-   - DO NOT include event_id for create operations
+If the action is "create_event", extract the following data from the prompt:
+- summary: Event title/name
+- description: Event description (optional)
+- start_time: Start date and time in ISO 8601 format (YYYY-MM-DDTHH:MM:SS)
+- end_time: End date and time in ISO 8601 format (YYYY-MM-DDTHH:MM:SS)
+- timezone: Timezone (default to "Asia/Kolkata" for Indian Standard Time)
+- location: Event location (optional)
+- attendees: List of attendees with name and email (optional)
 
-3. PUT /events/{{event_id}} - Update an existing event
-   - Use when: user wants to modify, change, update, edit, or reschedule an existing event
-   - Examples: "change my meeting time", "update event", "reschedule appointment"
-   - Required: event_id (you'll need to mention this needs to be provided)
-   - Optional in parsed_data: summary, description, location, start_time, end_time, timezone
+If the action is "update_event" or "delete_event", extract:
+- summary: Keywords from event title/name to search for (REQUIRED for identification)
+- start_time: Date/time to help identify the event - ALWAYS extract this when date/time keywords are mentioned
+- date: Specific date mentioned (YYYY-MM-DD format) - ALWAYS extract when "today", "tomorrow", or specific dates are mentioned
+- Any other identifying information from the prompt
 
-Current date and time context: {current_time}
+IMPORTANT FOR DELETE/UPDATE ACTIONS:
+- When user mentions "today", ALWAYS set date to today's date
+- When user mentions "tomorrow", ALWAYS set date to tomorrow's date
+- When user mentions "yesterday", ALWAYS set date to yesterday's date
+- When user mentions specific dates, convert them to YYYY-MM-DD format
+- When user mentions times (like "10 AM"), combine with the date to create start_time
+- Date filtering is CRITICAL for accurate event identification when multiple events have similar titles
 
-INTELLIGENT EVENT PARSING GUIDELINES:
-1. Extract meaningful event titles from the context:
-   - "going to Hyderabad" → "Trip to Hyderabad"
-   - "meeting with John" → "Meeting with John"
-   - "doctor appointment" → "Doctor Appointment"
-   - "lunch with team" → "Lunch with Team"
+For time parsing:
+- Always interpret times in the user's local timezone (Asia/Kolkata) unless explicitly stated otherwise
+- If only time is given (like "10 AM"), assume today's date unless "tomorrow" or specific date is mentioned
+- If "tomorrow" is mentioned, use tomorrow's date (2025-07-28)
+- Support both 12-hour (10 AM, 2 PM) and 24-hour (14:00) formats
+- If no end time specified, assume 1 hour duration
+- Always format datetime as YYYY-MM-DDTHH:MM:SS (local time, NOT UTC)
+- Always set timezone as "Asia/Kolkata" unless user specifies otherwise
+- Examples:
+  - "10 AM tomorrow" → start_time: "2025-07-28T10:00:00", timezone: "Asia/Kolkata"
+  - "2 PM to 3 PM today" → start_time: "2025-07-27T14:00:00", end_time: "2025-07-27T15:00:00"
 
-2. Generate descriptive details when possible:
-   - Include purpose, participants, or additional context from the prompt
-   - For travel: "Travel to [destination]" or "Trip to [location]"
-   - For meetings: Include participants if mentioned
-   - For appointments: Include type/purpose if mentioned
+For get_events actions, set parsed_data to null.
+For update_event and delete_event actions, extract event identification data in parsed_data.
 
-3. Location extraction:
-   - Extract specific places, addresses, or destinations mentioned
-   - For travel events, the destination becomes the location
+Current date and time: {current_time} (Asia/Kolkata timezone)
+Today's date: 2025-07-27
+Tomorrow's date: 2025-07-28
 
-4. Timezone handling:
-   - Default to "Asia/Kolkata" (Indian Standard Time) unless user specifies otherwise
-   - Support IST, UTC, and other common timezone abbreviations
+Return ONLY a valid JSON response in this exact format:
+{{
+  "action": "create_event|get_events|update_event|delete_event|unknown",
+  "confidence": 0.0-1.0,
+  "parsed_data": {{
+    "summary": "event title",
+    "description": "event description", 
+    "start_time": "2025-07-27T10:00:00",
+    "end_time": "2025-07-27T11:00:00",
+    "timezone": "Asia/Kolkata",
+    "location": "location",
+    "attendees": [
+      {{
+        "name": "John Doe",
+        "email": "john@example.com"
+      }}
+    ]
+  }} OR null,
+  "reasoning": "explanation of decision",
+  "endpoint": "/create-event|/listevents|/update-event|/delete-event",
+  "method": "POST|GET|PUT|POST"
+}}
 
-5. Time parsing:
-   - Support 12-hour format (12PM to 3PM)
-   - Support 24-hour format (14:00 to 15:00)
-   - If only time given, assume today's date
-   - Support relative times like "tomorrow", "next week"
+Note: delete_event uses POST method with event_id in request body.
 
-Parse the user's request and return a JSON response with:
-- action: one of "create_event", "update_event", "get_events", or "unknown"
-- confidence: float between 0 and 1
-- parsed_data: extracted event information (only if action is create_event or update_event, null for get_events)
-- reasoning: explanation of your decision
-- endpoint: the API endpoint to use
-- method: HTTP method (GET, POST, PUT)
+Example:
+User: "Schedule an interview with Jagadish (tamaranajagadeesh555@gmail.com) tomorrow from 10 AM to 11 AM in Hyderabad."
 
-For CREATE event (POST /events), include in parsed_data:
-- summary: meaningful event title extracted from context
-- description: descriptive details about the event (optional but encouraged)
-- location: if mentioned (optional)
-- start_time: ISO format datetime
-- end_time: ISO format datetime  
-- timezone: default to "Asia/Kolkata" unless specified otherwise
-- DO NOT include event_id
-
-For UPDATE event (PUT /events), include in parsed_data only the fields being updated:
-- summary: if changing title (optional)
-- description: if changing description (optional)  
-- location: if changing location (optional)
-- start_time: if changing start time (optional)
-- end_time: if changing end time (optional)
-- timezone: if specified (optional)
-- event_id: REQUIRED for updates
-
-For get_events action, set parsed_data to null.
-
-Return ONLY valid JSON, no additional text.
-
-Example for get events:
-{
-  "action": "get_events",
-  "confidence": 0.95,
-  "parsed_data": null,
-  "reasoning": "User wants to view their calendar events",
-  "endpoint": "/events",
-  "method": "GET"
-}
-
-Example for create event:
-{
+Response:
+{{
   "action": "create_event",
   "confidence": 0.95,
-  "parsed_data": {
-    "summary": "Trip to Hyderabad",
-    "description": "Travel to Hyderabad for business/personal trip",
+  "parsed_data": {{
+    "summary": "Interview with Jagadish",
+    "description": "Interview session with Jagadish",
+    "start_time": "2025-07-28T10:00:00",
+    "end_time": "2025-07-28T11:00:00",
+    "timezone": "Asia/Kolkata",
     "location": "Hyderabad",
-    "start_time": "2025-07-24T12:00:00",
-    "end_time": "2025-07-24T15:00:00",
-    "timezone": "Asia/Kolkata"
-  },
-  "reasoning": "User wants to create a travel event to Hyderabad",
-  "endpoint": "/events",
+    "attendees": [
+      {{
+        "name": "Jagadish",
+        "email": "tamaranajagadeesh555@gmail.com"
+      }}
+    ]
+  }},
+  "reasoning": "User wants to schedule a new interview event with specific time, location, and attendee",
+  "endpoint": "/create-event",
   "method": "POST"
-}
-
-Example prompts and expected parsing:
-- "create an event that i am going to Hyderabad 12PM to 3PM" → 
-  summary: "Trip to Hyderabad", description: "Travel to Hyderabad", location: "Hyderabad"
-- "meeting with John tomorrow 2-3PM" → 
-  summary: "Meeting with John", description: "Meeting scheduled with John"
-- "doctor appointment at 10AM" → 
-  summary: "Doctor Appointment", description: "Medical appointment"
+}}
         """
 
-    def _parse_time_expression(self, time_expr: str, base_date: Optional[datetime] = None) -> tuple[Optional[str], Optional[str]]:
-        """Parse time expressions like '10-11AM', 'tomorrow 2PM', etc."""
-        if base_date is None:
-            base_date = datetime.now()
-            
-        time_expr = time_expr.lower().strip()
-        
-        # Handle date expressions
-        target_date = base_date.date()
-        if 'tomorrow' in time_expr:
-            target_date = (base_date + timedelta(days=1)).date()
-        elif 'next week' in time_expr:
-            target_date = (base_date + timedelta(days=7)).date()
-        elif re.search(r'\d{4}-\d{2}-\d{2}', time_expr):
-            date_match = re.search(r'(\d{4}-\d{2}-\d{2})', time_expr)
-            if date_match:
-                target_date = datetime.fromisoformat(date_match.group(1)).date()
-        
-        # Parse time ranges like "12PM to 3PM", "12-3PM", "10-11AM"
-        time_range_pattern = r'(\d{1,2})(?::(\d{2}))?\s*(?:pm|am|PM|AM)?\s*(?:to|-)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm|AM|PM)?'
-        match = re.search(time_range_pattern, time_expr)
-        
-        if match:
-            start_hour = int(match.group(1))
-            start_min = int(match.group(2)) if match.group(2) else 0
-            end_hour = int(match.group(3))
-            end_min = int(match.group(4)) if match.group(4) else 0
-            period = match.group(5).lower() if match.group(5) else None
-            
-            # Handle AM/PM for range times
-            if period:
-                if period == 'pm':
-                    if start_hour != 12:
-                        start_hour += 12
-                    if end_hour != 12 and end_hour < 12:
-                        end_hour += 12
-                elif period == 'am':
-                    if start_hour == 12:
-                        start_hour = 0
-                    if end_hour == 12:
-                        end_hour = 0
-            else:
-                # If no period specified, check for individual periods in the original expression
-                start_period_match = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(pm|am|PM|AM)', time_expr)
-                if start_period_match:
-                    start_period = start_period_match.group(3).lower()
-                    if start_period == 'pm' and start_hour != 12:
-                        start_hour += 12
-                    elif start_period == 'am' and start_hour == 12:
-                        start_hour = 0
-                
-                # For end time, if no explicit period, assume same as start for reasonable times
-                if start_hour >= 12 and end_hour < 12:  # PM start time
-                    end_hour += 12
-            
-            start_time = datetime.combine(target_date, datetime.min.time().replace(hour=start_hour, minute=start_min))
-            end_time = datetime.combine(target_date, datetime.min.time().replace(hour=end_hour, minute=end_min))
-            
-            # Return in ISO format compatible with Google Calendar API
-            return start_time.strftime('%Y-%m-%dT%H:%M:%S'), end_time.strftime('%Y-%m-%dT%H:%M:%S')
-        
-        # Single time like "2PM", "14:30"
-        single_time_pattern = r'(\d{1,2})(?::(\d{2}))?\s*(am|pm|AM|PM)?'
-        match = re.search(single_time_pattern, time_expr)
-        
-        if match:
-            hour = int(match.group(1))
-            minute = int(match.group(2)) if match.group(2) else 0
-            period = match.group(3).lower() if match.group(3) else None
-            
-            if period:
-                if period == 'pm' and hour != 12:
-                    hour += 12
-                elif period == 'am' and hour == 12:
-                    hour = 0
-            
-            start_time = datetime.combine(target_date, datetime.min.time().replace(hour=hour, minute=minute))
-            # Default 1 hour duration
-            end_time = start_time + timedelta(hours=1)
-            
-            # Return in ISO format compatible with Google Calendar API
-            return start_time.strftime('%Y-%m-%dT%H:%M:%S'), end_time.strftime('%Y-%m-%dT%H:%M:%S')
-        
-        return None, None
-
-    async def parse_user_prompt(self, prompt: str) -> LLMResponse:
+    def parse_user_prompt(self, prompt: str) -> LLMResponse:
         """Parse user prompt using Gemini LLM"""
         try:
-            current_time = datetime.now().isoformat()
+            # Get current time in Asia/Kolkata timezone
+            ist_tz = timezone(timedelta(hours=5, minutes=30))
+            current_time = datetime.now(ist_tz).isoformat()
             system_prompt = self._get_system_prompt().format(current_time=current_time)
             
-            full_prompt = f"{system_prompt}\n\nUser request: {prompt}"
+            full_prompt = f"{system_prompt}\n\nUser prompt: {prompt}"
             
             response = self.model.generate_content(full_prompt)
-            
-            # Clean and parse JSON response
             response_text = response.text.strip()
             
-            # Remove markdown code blocks if present
+            # Clean markdown code blocks if present
             if response_text.startswith('```json'):
                 response_text = response_text[7:]
             if response_text.endswith('```'):
@@ -247,314 +147,356 @@ Example prompts and expected parsing:
             
             try:
                 parsed_response = json.loads(response_text)
-            except json.JSONDecodeError:
-                # Fallback parsing if JSON is malformed
+                
+                # Debug: Print the raw LLM response
+                print(f"LLM Response: {parsed_response}")
+                
+                # Fix missing attendee names
+                if parsed_response.get('parsed_data') and parsed_response['parsed_data'].get('attendees'):
+                    attendees = parsed_response['parsed_data']['attendees']
+                    for attendee in attendees:
+                        if not attendee.get('name') and attendee.get('email'):
+                            attendee['name'] = attendee['email'].split('@')[0]
+
+                return LLMResponse(**parsed_response)
+            except json.JSONDecodeError as e:
+                print(f"JSON decode error: {e}")
+                print(f"Raw LLM response: {response_text}")
                 return self._fallback_parse(prompt)
-            
-            # Enhanced time parsing
-            if parsed_response.get('parsed_data'):
-                data = parsed_response['parsed_data']
+            except Exception as e:
+                print(f"Validation error: {e}")
+                print(f"Raw LLM response: {response_text}")
+                return self._fallback_parse(prompt)
                 
-                # Set default timezone to Indian Standard Time if not specified
-                if not data.get('timezone'):
-                    data['timezone'] = 'Asia/Kolkata'
-                
-                if data.get('start_time') and data.get('end_time'):
-                    # Times already parsed by LLM
-                    pass
-                else:
-                    # Try to extract time from original prompt
-                    start_time, end_time = self._parse_time_expression(prompt)
-                    if start_time and end_time:
-                        if not data.get('start_time'):
-                            data['start_time'] = start_time
-                        if not data.get('end_time'):
-                            data['end_time'] = end_time
-            
-            # Handle cases where parsed_data might have extra fields
-            try:
-                # Clean parsed_data based on action type
-                if 'parsed_data' in parsed_response and parsed_response['parsed_data']:
-                    action_type = parsed_response.get('action')
-                    data = parsed_response['parsed_data']
-                    
-                    # For create operations, remove event_id if it was incorrectly included
-                    if action_type == 'create_event' and 'event_id' in data:
-                        del data['event_id']
-                        print("Removed event_id from create_event operation")
-                    
-                    # For get_events operations, parsed_data should be null
-                    if action_type == 'get_events':
-                        parsed_response['parsed_data'] = None
-                        print("Set parsed_data to null for get_events operation")
-                
-                return LLMResponse(**parsed_response)
-            except Exception as validation_error:
-                print(f"Validation error: {validation_error}")
-                # Try to clean the parsed_data if it exists
-                if 'parsed_data' in parsed_response and parsed_response['parsed_data']:
-                    # Only keep valid fields for ParsedEventData
-                    valid_fields = ['summary', 'description', 'location', 'start_time', 'end_time', 'date', 'timezone', 'event_id']
-                    cleaned_data = {k: v for k, v in parsed_response['parsed_data'].items() if k in valid_fields}
-                    
-                    # Remove event_id for create operations
-                    action_type = parsed_response.get('action')
-                    if action_type == 'create_event' and 'event_id' in cleaned_data:
-                        del cleaned_data['event_id']
-                    
-                    parsed_response['parsed_data'] = cleaned_data
-                
-                return LLMResponse(**parsed_response)
-            
         except Exception as e:
             print(f"LLM parsing error: {e}")
-            # Return fallback response instead of raising exception
             return self._fallback_parse(prompt)
 
     def _fallback_parse(self, prompt: str) -> LLMResponse:
         """Fallback parsing when LLM response is invalid"""
         prompt_lower = prompt.lower()
         
-        # Simple keyword-based parsing
-        if any(word in prompt_lower for word in ['create', 'add', 'schedule', 'book', 'make']):
+        if any(word in prompt_lower for word in ['create', 'add', 'schedule', 'book', 'make', 'plan', 'meeting']):
             action = ActionType.CREATE_EVENT
-            endpoint = "/events"
+            endpoint = "/create-event"
             method = "POST"
-            # Try to extract basic info for creation (NO event_id for create)
-            start_time, end_time = self._parse_time_expression(prompt)
-            parsed_data = ParsedEventData(
-                summary=self._extract_summary(prompt),
-                description=self._extract_description(prompt),
-                location=self._extract_location(prompt),
-                start_time=start_time,
-                end_time=end_time,
-                timezone="Asia/Kolkata"  # Default to Indian timezone
-                # event_id is intentionally omitted for create operations
-            )
+            reasoning = "Detected creation keywords in prompt"
+        elif any(word in prompt_lower for word in ['show', 'list', 'get', 'view', 'see', 'check', 'display']):
+            action = ActionType.GET_EVENTS  
+            endpoint = "/listevents"
+            method = "GET"
+            reasoning = "Detected viewing keywords in prompt"
         elif any(word in prompt_lower for word in ['update', 'change', 'modify', 'edit', 'reschedule']):
             action = ActionType.UPDATE_EVENT
-            endpoint = "/events/{event_id}"
+            endpoint = "/update-event"
             method = "PUT"
-            parsed_data = None  # Updates need event_id which we don't have in fallback
-        elif any(word in prompt_lower for word in ['show', 'list', 'get', 'view', 'see', 'check', 'all', 'upcoming']):
-            action = ActionType.GET_EVENTS
-            endpoint = "/events"
-            method = "GET"
-            parsed_data = None  # No data needed for getting events
+            reasoning = "Detected update keywords in prompt"
+        elif any(word in prompt_lower for word in ['delete', 'remove', 'cancel', 'cancel']):
+            action = ActionType.DELETE_EVENT
+            endpoint = "/delete-event"
+            method = "POST"  # DELETE endpoint uses POST with request body
+            reasoning = "Detected delete keywords in prompt"
         else:
             action = ActionType.UNKNOWN
             endpoint = None
             method = None
-            parsed_data = None
+            reasoning = "Could not determine intent from prompt"
         
         return LLMResponse(
             action=action,
-            confidence=0.7,
-            parsed_data=parsed_data,
-            reasoning=f"Fallback parsing detected keywords for {action.value}",
+            confidence=0.6,
+            parsed_data=None,
+            reasoning=reasoning,
             endpoint=endpoint,
             method=method
         )
 
-    def _extract_summary(self, prompt: str) -> str:
-        """Extract event summary from prompt"""
-        prompt_lower = prompt.lower()
+    def match_events_for_update_delete(self, user_input: str, events_list: List[Dict]) -> List[Dict]:
+        """
+        Match events from the calendar list based on user input.
         
-        # Travel/trip related
-        if any(phrase in prompt_lower for phrase in ['going to', 'trip to', 'travel to', 'visiting']):
-            # Extract destination
-            destinations = re.findall(r'(?:going to|trip to|travel to|visiting)\s+([a-zA-Z\s]+?)(?:\s+(?:at|from|on|\d)|\s*$)', prompt_lower)
-            if destinations:
-                destination = destinations[0].strip().title()
-                return f"Trip to {destination}"
-        
-        # Meeting related
-        if any(word in prompt_lower for word in ['meeting', 'meet']):
-            # Extract who with
-            with_match = re.search(r'(?:meeting|meet)\s+(?:with\s+)?([a-zA-Z\s]+?)(?:\s+(?:at|from|on|\d)|\s*$)', prompt_lower)
-            if with_match:
-                person = with_match.group(1).strip().title()
-                return f"Meeting with {person}"
-            return "Meeting"
-        
-        # Appointment related
-        if 'appointment' in prompt_lower:
-            # Extract type of appointment
-            type_match = re.search(r'(\w+)\s+appointment', prompt_lower)
-            if type_match:
-                apt_type = type_match.group(1).title()
-                return f"{apt_type} Appointment"
-            return "Appointment"
-        
-        # Class/lesson related
-        if any(word in prompt_lower for word in ['class', 'lesson', 'training']):
-            # Extract subject
-            subject_match = re.search(r'(\w+)\s+(?:class|lesson|training)', prompt_lower)
-            if subject_match:
-                subject = subject_match.group(1).title()
-                return f"{subject} Class"
-            return "Class Session"
-        
-        # Lunch/dinner/meal related
-        if any(word in prompt_lower for word in ['lunch', 'dinner', 'breakfast', 'meal']):
-            meal_type = None
-            for meal in ['breakfast', 'lunch', 'dinner']:
-                if meal in prompt_lower:
-                    meal_type = meal.title()
-                    break
+        Args:
+            user_input: The user's original prompt
+            events_list: List of events from the calendar API
             
-            # Extract who with
-            with_match = re.search(rf'{meal_type.lower() if meal_type else "meal"}\s+(?:with\s+)?([a-zA-Z\s]+?)(?:\s+(?:at|from|on|\d)|\s*$)', prompt_lower)
-            if with_match:
-                person = with_match.group(1).strip().title()
-                return f"{meal_type or 'Meal'} with {person}"
-            return meal_type or "Meal"
+        Returns:
+            List of matching events with match scores
+        """
+        if not events_list:
+            return []
         
-        # Default: Use meaningful words from the prompt, skip common words
-        words = prompt.split()
-        skip_words = {'create', 'an', 'event', 'that', 'i', 'am', 'at', 'to', 'from', 'on', 'in', 'the', 'a', 'and', 'or', 'but'}
-        meaningful_words = [word for word in words if word.lower() not in skip_words and not re.match(r'\d+(?:pm|am|:\d+)', word.lower())]
+        # Parse user input for event identification
+        llm_response = self.parse_user_prompt(user_input)
+        search_criteria = {}
         
-        if meaningful_words:
-            return ' '.join(meaningful_words[:4]).title()
-        else:
-            return "Event"
-
-    def _extract_description(self, prompt: str) -> Optional[str]:
-        """Extract event description from prompt"""
-        prompt_lower = prompt.lower()
+        # Extract search criteria from parsed_data if available
+        if llm_response.parsed_data:
+            if hasattr(llm_response.parsed_data, 'summary') and llm_response.parsed_data.summary:
+                search_criteria['summary'] = str(llm_response.parsed_data.summary)
+            if hasattr(llm_response.parsed_data, 'start_time') and llm_response.parsed_data.start_time:
+                search_criteria['start_time'] = str(llm_response.parsed_data.start_time)
+            if hasattr(llm_response.parsed_data, 'date') and llm_response.parsed_data.date:
+                search_criteria['date'] = str(llm_response.parsed_data.date)
         
-        # Travel/trip related
-        if any(phrase in prompt_lower for phrase in ['going to', 'trip to', 'travel to', 'visiting']):
-            destinations = re.findall(r'(?:going to|trip to|travel to|visiting)\s+([a-zA-Z\s]+?)(?:\s+(?:at|from|on|\d)|\s*$)', prompt_lower)
-            if destinations:
-                destination = destinations[0].strip().title()
-                return f"Travel to {destination}"
+        matches = []
+        user_input_lower = user_input.lower()
         
-        # Meeting related
-        if any(word in prompt_lower for word in ['meeting', 'meet']):
-            with_match = re.search(r'(?:meeting|meet)\s+(?:with\s+)?([a-zA-Z\s]+?)(?:\s+(?:at|from|on|\d)|\s*$)', prompt_lower)
-            if with_match:
-                person = with_match.group(1).strip().title()
-                return f"Meeting scheduled with {person}"
-            return "Meeting scheduled"
-        
-        # Appointment related
-        if 'appointment' in prompt_lower:
-            type_match = re.search(r'(\w+)\s+appointment', prompt_lower)
-            if type_match:
-                apt_type = type_match.group(1).title()
-                return f"{apt_type} appointment scheduled"
-            return "Appointment scheduled"
-        
-        # Default description based on the event type
-        summary = self._extract_summary(prompt)
-        if summary and summary != "Event":
-            return f"{summary} scheduled"
-        
-        return None
-
-    def _extract_location(self, prompt: str) -> Optional[str]:
-        """Extract location from prompt"""
-        prompt_lower = prompt.lower()
-        
-        # Extract destinations for travel
-        if any(phrase in prompt_lower for phrase in ['going to', 'trip to', 'travel to', 'visiting']):
-            destinations = re.findall(r'(?:going to|trip to|travel to|visiting)\s+([a-zA-Z\s]+?)(?:\s+(?:at|from|on|\d)|\s*$)', prompt_lower)
-            if destinations:
-                return destinations[0].strip().title()
-        
-        # Look for common location indicators
-        location_patterns = [
-            r'at\s+([a-zA-Z\s]+?)(?:\s+(?:from|on|\d)|\s*$)',
-            r'in\s+([a-zA-Z\s]+?)(?:\s+(?:at|from|on|\d)|\s*$)',
-            r'(?:office|building|room|hall|center|restaurant|cafe|hotel)\s+([a-zA-Z\s\d]+?)(?:\s+(?:at|from|on|\d)|\s*$)'
-        ]
-        
-        for pattern in location_patterns:
-            match = re.search(pattern, prompt_lower)
-            if match:
-                location = match.group(1).strip().title()
-                # Filter out time-related words
-                if not re.match(r'\d+(?:pm|am|:\d+)', location.lower()):
-                    return location
-        
-        return None
-
-    async def execute_calendar_action(self, llm_response: LLMResponse) -> Dict[Any, Any]:
-        """Execute the calendar action based on LLM response"""
-        try:
-            if llm_response.action == ActionType.GET_EVENTS:
-                events = list_upcoming_events()
-                return {
-                    "events": events,
-                    "count": len(events),
-                    "message": f"Found {len(events)} upcoming events"
-                }
+        for event in events_list:
+            # Skip events that are None or malformed
+            if not event or not isinstance(event, dict):
+                continue
+                
+            match_score = 0.0
+            match_reasons = []
             
-            elif llm_response.action == ActionType.CREATE_EVENT:
-                if not llm_response.parsed_data:
-                    raise HTTPException(status_code=400, detail="No event data found in prompt")
-                
-                data = llm_response.parsed_data
-                
-                # Validate required fields
-                if not data.summary:
-                    data.summary = "Event"
-                if not data.start_time or not data.end_time:
-                    raise HTTPException(status_code=400, detail="Start and end times are required")
-                
-                # Create EventCreate model
-                event_create = EventCreate(
-                    summary=data.summary,
-                    description=data.description or "",
-                    location=data.location or "",
-                    start=EventDateTime(
-                        dateTime=data.start_time,
-                        timeZone=data.timezone or "Asia/Kolkata"  # Default to Indian timezone
-                    ),
-                    end=EventDateTime(
-                        dateTime=data.end_time,
-                        timeZone=data.timezone or "Asia/Kolkata"  # Default to Indian timezone
-                    )
-                )
-                
-                # Convert to dict for Google Calendar API
-                event_dict = {
-                    "summary": event_create.summary,
-                    "start": event_create.start.dict(exclude_none=True),
-                    "end": event_create.end.dict(exclude_none=True),
-                }
-                
-                if event_create.description:
-                    event_dict["description"] = event_create.description
-                if event_create.location:
-                    event_dict["location"] = event_create.location
-                
-                created_event = create_event(event_dict)
-                return {
-                    "event": created_event,
-                    "message": f"Successfully created event: {event_create.summary}"
-                }
+            # Get event details
+            event_summary = event.get('summary', '') or ''  # Handle None values
+            event_summary = event_summary.lower()
+            event_start = event.get('start', {}) or {}  # Handle None start
+            event_date = None
             
-            elif llm_response.action == ActionType.UPDATE_EVENT:
-                return {
-                    "message": "Event updates require an event ID. Please specify which event you want to update.",
-                    "action_needed": "Please provide the event ID or be more specific about which event to update"
-                }
+            # Extract date from event
+            if 'dateTime' in event_start:
+                try:
+                    event_datetime_str = event_start['dateTime']
+                    if event_datetime_str:  # Check if not None or empty
+                        event_datetime = datetime.fromisoformat(event_datetime_str.replace('Z', '+00:00'))
+                        event_date = event_datetime.date()
+                except (ValueError, TypeError, AttributeError):
+                    pass
+            elif 'date' in event_start:
+                try:
+                    event_date_str = event_start['date']
+                    if event_date_str:  # Check if not None or empty
+                        event_date = datetime.fromisoformat(event_date_str).date()
+                except (ValueError, TypeError, AttributeError):
+                    pass
             
-            else:
-                return {
-                    "message": "I couldn't understand your request. Please try rephrasing it.",
-                    "suggestions": [
-                        "Try: 'Create meeting for 2-3PM tomorrow'",
-                        "Try: 'Show my upcoming events'",
-                        "Try: 'Schedule appointment at 10AM'"
-                    ]
-                }
+            # Match on event title/summary
+            if search_criteria.get('summary'):
+                search_summary = search_criteria['summary'].lower()
+                if search_summary in event_summary:
+                    match_score += 0.5
+                    match_reasons.append(f"Title contains '{search_criteria['summary']}'")
+                else:
+                    # Use fuzzy matching for partial matches
+                    similarity = difflib.SequenceMatcher(None, search_summary, event_summary).ratio()
+                    if similarity > 0.6:
+                        match_score += similarity * 0.4
+                        match_reasons.append(f"Title similarity ({similarity:.2f})")
+            
+            # Look for keywords in user input that might match event summary
+            if event_summary:  # Only if event_summary is not empty
+                summary_words = event_summary.split()
+                for word in summary_words:
+                    if len(word) > 3 and word in user_input_lower:
+                        match_score += 0.3
+                        match_reasons.append(f"Contains keyword '{word}'")
+                        break
                 
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to execute calendar action: {str(e)}")
+                # Additional check for names in user input (case insensitive)
+                user_words = user_input_lower.split()
+                for user_word in user_words:
+                    if len(user_word) > 2 and user_word in event_summary:
+                        match_score += 0.4
+                        match_reasons.append(f"Contains name/word '{user_word}'")
+                        break
+            
+            # Match on date
+            if event_date:
+                # Check for date mentions in user input
+                today = datetime.now().date()
+                tomorrow = today + timedelta(days=1)
+                
+                if 'today' in user_input_lower and event_date == today:
+                    match_score += 0.6  # Increased weight for date matching
+                    match_reasons.append("Date matches 'today'")
+                elif 'tomorrow' in user_input_lower and event_date == tomorrow:
+                    match_score += 0.6  # Increased weight for date matching
+                    match_reasons.append("Date matches 'tomorrow'")
+                elif search_criteria.get('start_time'):
+                    try:
+                        search_date = datetime.fromisoformat(search_criteria['start_time']).date()
+                        if event_date == search_date:
+                            match_score += 0.6  # Increased weight for date matching
+                            match_reasons.append("Date matches specified date")
+                    except:
+                        pass
+                elif search_criteria.get('date'):
+                    try:
+                        search_date = datetime.fromisoformat(search_criteria['date']).date()
+                        if event_date == search_date:
+                            match_score += 0.6  # Increased weight for date matching
+                            match_reasons.append("Date matches specified date")
+                    except:
+                        pass
+                
+                # Check for date keywords (July 28, etc.)
+                if event_date:
+                    try:
+                        date_str = event_date.strftime("%B %d").lower()
+                        if date_str in user_input_lower:
+                            match_score += 0.5
+                            match_reasons.append(f"Date matches '{date_str}'")
+                    except (ValueError, AttributeError):
+                        pass
+                
+                # Penalty for wrong date when date is explicitly mentioned
+                if 'today' in user_input_lower and event_date != today:
+                    match_score -= 0.2  # Reduced penalty for wrong date
+                    match_reasons.append("Date does NOT match 'today' (penalty applied)")
+                elif 'tomorrow' in user_input_lower and event_date != tomorrow:
+                    match_score -= 0.2  # Reduced penalty for wrong date
+                    match_reasons.append("Date does NOT match 'tomorrow' (penalty applied)")
+            
+            # Match on time if specified
+            if search_criteria.get('start_time') and 'dateTime' in event_start:
+                try:
+                    search_datetime = datetime.fromisoformat(search_criteria['start_time'])
+                    event_datetime = datetime.fromisoformat(event_start['dateTime'].replace('Z', '+00:00'))
+                    
+                    # Check if times are close (within 30 minutes)
+                    time_diff = abs((event_datetime - search_datetime).total_seconds())
+                    if time_diff <= 1800:  # 30 minutes
+                        match_score += 0.3
+                        match_reasons.append("Time matches closely")
+                except:
+                    pass
+            
+            # Bonus for events that match both title keywords AND correct date
+            has_title_match = any("keyword" in reason or "similarity" in reason or "name/word" in reason or "Title contains" in reason for reason in match_reasons)
+            has_date_match = any("Date matches" in reason and "penalty" not in reason for reason in match_reasons)
+            
+            if has_title_match and has_date_match:
+                match_score += 0.3  # Bonus for matching both title and date
+                match_reasons.append("Bonus: matches both title and date")
+            
+            # Only include events with reasonable match scores
+            # Lowered threshold to be less strict
+            if match_score > 0.2:
+                matches.append({
+                    'event': event,
+                    'match_score': match_score,
+                    'match_reasons': match_reasons
+                })
+        
+        # Sort by match score (highest first)
+        matches.sort(key=lambda x: x['match_score'], reverse=True)
+        
+        # Post-processing: If we have multiple matches and date is explicitly mentioned,
+        # filter to only include events that match the specified date
+        if len(matches) > 1:
+            today = datetime.now().date()
+            tomorrow = today + timedelta(days=1)
+            
+            # Check if user mentioned specific date keywords
+            date_filtered_matches = []
+            
+            if 'tomorrow' in user_input_lower:
+                # Filter for events on tomorrow's date
+                for match in matches:
+                    event = match['event']
+                    event_start = event.get('start', {}) or {}
+                    event_date = None
+                    
+                    # Extract date from event
+                    if 'dateTime' in event_start:
+                        try:
+                            event_datetime_str = event_start['dateTime']
+                            if event_datetime_str:
+                                event_datetime = datetime.fromisoformat(event_datetime_str.replace('Z', '+00:00'))
+                                event_date = event_datetime.date()
+                        except (ValueError, TypeError, AttributeError):
+                            pass
+                    elif 'date' in event_start:
+                        try:
+                            event_date_str = event_start['date']
+                            if event_date_str:
+                                event_date = datetime.fromisoformat(event_date_str).date()
+                        except (ValueError, TypeError, AttributeError):
+                            pass
+                    
+                    # Only include events that match tomorrow's date
+                    if event_date == tomorrow:
+                        date_filtered_matches.append(match)
+                        
+            elif 'today' in user_input_lower:
+                # Filter for events on today's date
+                for match in matches:
+                    event = match['event']
+                    event_start = event.get('start', {}) or {}
+                    event_date = None
+                    
+                    # Extract date from event
+                    if 'dateTime' in event_start:
+                        try:
+                            event_datetime_str = event_start['dateTime']
+                            if event_datetime_str:
+                                event_datetime = datetime.fromisoformat(event_datetime_str.replace('Z', '+00:00'))
+                                event_date = event_datetime.date()
+                        except (ValueError, TypeError, AttributeError):
+                            pass
+                    elif 'date' in event_start:
+                        try:
+                            event_date_str = event_start['date']
+                            if event_date_str:
+                                event_date = datetime.fromisoformat(event_date_str).date()
+                        except (ValueError, TypeError, AttributeError):
+                            pass
+                    
+                    # Only include events that match today's date
+                    if event_date == today:
+                        date_filtered_matches.append(match)
+                        
+            elif search_criteria.get('start_time') or search_criteria.get('date'):
+                # Filter based on parsed date from LLM
+                target_date = None
+                if search_criteria.get('start_time'):
+                    try:
+                        target_date = datetime.fromisoformat(search_criteria['start_time']).date()
+                    except:
+                        pass
+                elif search_criteria.get('date'):
+                    try:
+                        target_date = datetime.fromisoformat(search_criteria['date']).date()
+                    except:
+                        pass
+                
+                if target_date:
+                    for match in matches:
+                        event = match['event']
+                        event_start = event.get('start', {}) or {}
+                        event_date = None
+                        
+                        # Extract date from event
+                        if 'dateTime' in event_start:
+                            try:
+                                event_datetime_str = event_start['dateTime']
+                                if event_datetime_str:
+                                    event_datetime = datetime.fromisoformat(event_datetime_str.replace('Z', '+00:00'))
+                                    event_date = event_datetime.date()
+                            except (ValueError, TypeError, AttributeError):
+                                pass
+                        elif 'date' in event_start:
+                            try:
+                                event_date_str = event_start['date']
+                                if event_date_str:
+                                    event_date = datetime.fromisoformat(event_date_str).date()
+                            except (ValueError, TypeError, AttributeError):
+                                pass
+                        
+                        # Only include events that match the target date
+                        if event_date == target_date:
+                            date_filtered_matches.append(match)
+            
+            # If we found date-filtered matches, use them instead of all matches
+            # This significantly reduces ambiguity when date is mentioned
+            if date_filtered_matches:
+                matches = date_filtered_matches
+                # Re-sort the filtered matches by score
+                matches.sort(key=lambda x: x['match_score'], reverse=True)
+        
+        return matches
 
 # Global instance
 llm_service = LLMService()

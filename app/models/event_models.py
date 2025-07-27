@@ -358,3 +358,58 @@ class EventResponse(BaseModel):
                 "status": "confirmed"
             }
         }
+
+
+class EventDeleteResponse(BaseModel):
+    """Model for event deletion response"""
+    message: str = Field(..., description="Success message", example="Event deleted successfully")
+    eventId: str = Field(..., description="ID of the deleted event", example="abc123def456ghi789")
+    deleted: bool = Field(True, description="Deletion confirmation", example=True)
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "message": "Event deleted successfully",
+                "eventId": "abc123def456ghi789",
+                "deleted": True
+            }
+        }
+
+
+class EventAlreadyDeletedResponse(BaseModel):
+    """Model for event already deleted response"""
+    statusCode: int = Field(410, description="HTTP status code")
+    errorMessage: str = Field("Event has already been deleted", description="Error message")
+    statusMessage: str = Field("Gone", description="HTTP status message")
+    detail: str = Field(..., description="Detailed error information")
+    eventId: str = Field(..., description="ID of the already deleted event")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "statusCode": 410,
+                "errorMessage": "Event has already been deleted",
+                "statusMessage": "Gone", 
+                "detail": "Delete event: Event has already been deleted",
+                "eventId": "abc123def456ghi789"
+            }
+        }
+
+
+class EventDeleteRequest(BaseModel):
+    """Model for event deletion request"""
+    event_id: str = Field(..., description="ID of the event to delete", example="abc123def456ghi789")
+    send_updates: str = Field(
+        default="all",
+        description="Notification setting for guests",
+        pattern="^(all|externalOnly|none)$",
+        example="all"
+    )
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "event_id": "abc123def456ghi789",
+                "send_updates": "all"
+            }
+        }

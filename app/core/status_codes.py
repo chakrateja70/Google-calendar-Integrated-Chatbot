@@ -22,6 +22,7 @@ class HTTPStatus(Enum):
     NOT_FOUND = 404
     METHOD_NOT_ALLOWED = 405
     CONFLICT = 409
+    GONE = 410
     UNPROCESSABLE_ENTITY = 422
     TOO_MANY_REQUESTS = 429
     
@@ -58,6 +59,10 @@ class ErrorMessages:
     # Timeout and Connection
     REQUEST_TIMEOUT_CALENDAR = "Request timeout: Google Calendar API took too long to respond"
     CONNECTION_ERROR_CALENDAR = "Service unavailable: Unable to connect to Google Calendar API"
+    
+    # Resource state errors
+    RESOURCE_DELETED = "Resource has been deleted"
+    EVENT_ALREADY_DELETED = "Event has already been deleted"
     
     # Generic Errors
     INTERNAL_ERROR = "Internal server error occurred"

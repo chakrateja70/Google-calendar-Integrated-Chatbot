@@ -6,29 +6,24 @@ A FastAPI-based REST API for integrating with Google Calendar, featuring an AI-p
 
 - **🤖 AI-Powered Calendar Assistant**: Natural language calendar management using Google Gemini AI
 - **📅 Google Calendar Integration**: Full read/write access to Google Calendar
-- **🗣️ Natural Language Processing**: Create events with phrases like "Schedule meeting tomorrow 2-3PM"
+- **🗣️ Natural Language Processing**: Create, view, and delete events with natural language commands
 - **🔐 OAuth2 Authentication**: Secure Google authentication flow
 - **📊 RESTful API**: Clean REST endpoints for programmatic access
 - **🌐 CORS Support**: Cross-origin resource sharing enabled
-- **💾 Database Ready**: SQLAlchemy integration for future data persistence
 
-## 🚀 AI Features (In Development)
+## � What This Project Does
 
-### Natural Language Calendar Operations (Coming Soon)
-- **Create Events**: "Create event for 10-11AM I'm in 11th class"
-- **View Events**: "Show my upcoming events"
-- **Smart Parsing**: Automatically extracts dates, times, and event details
-- **Context Aware**: Understands relative dates like "tomorrow", "next week"
-
-*Note: The LLM service foundation is implemented but API endpoints are under development.*
+- **Chat Interface**: Ask in plain English - "Schedule meeting tomorrow 2-3PM", "Show my events today", "Cancel my 10 AM meeting"
+- **Smart Event Management**: Creates, lists, and deletes calendar events based on your natural language requests
+- **Google Calendar Integration**: Directly connects to your Google Calendar account
+- **AI Understanding**: Uses Google Gemini AI to understand your calendar requests
 
 ## Tech Stack
 
 - **Backend**: FastAPI (Python)
-- **AI**: Google Gemini Flash 1.5 (Free tier)
+- **AI**: Google Gemini Flash 1.5
 - **Authentication**: Google OAuth2
 - **Calendar API**: Google Calendar API v3
-- **Database**: SQLAlchemy with MySQL support
 - **Server**: Uvicorn ASGI server
 
 
@@ -38,13 +33,14 @@ A FastAPI-based REST API for integrating with Google Calendar, featuring an AI-p
 - Google Cloud Platform account
 - Google Calendar API enabled
 - Google OAuth2 credentials
+- Gemini API key
 
 ## Setup Instructions
 
 ### 1. Clone the Repository
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/chakrateja70/Google-calendar-Integrated-Chatbot.git
 cd calender_Integration
 ```
 
@@ -72,15 +68,27 @@ Create a `.env` file in the project root:
 
 ```env
 GOOGLE_CALENDAR_ID=primary
+GEMINI_API_KEY=your_gemini_api_key_here
 ```
+
+Get your Gemini API key from [Google AI Studio](https://makersuite.google.com/app/apikey)
 
 ### 5. Run the Application
 
 ```bash
-python main.py
+uvicorn main:app --reload
 ```
 
 The API will be available at `http://localhost:8000`
+
+## How to Use
+
+1. **Visit** `http://localhost:8000/docs` for API documentation
+2. **Chat with AI**: Use the `/chat` endpoint with natural language
+   - "Schedule meeting tomorrow 2-3PM"
+   - "Show my events today"
+   - "Cancel my meeting at 10 AM"
+3. **Direct API**: Use specific endpoints like `/listevents`, `/create-event`, `/delete-event`
 
 ## Authentication Flow
 
@@ -153,16 +161,12 @@ This project is licensed under the MIT License.
 
 - [x] Create calendar events
 - [x] List calendar events  
-- [x] Get calendar IDs
+- [x] Delete events
+- [x] Natural language chat interface
 - [x] Google Calendar API integration
 - [x] OAuth2 authentication
-- [x] Swagger/OpenAPI documentation
-- [x] LLM service foundation
-- [ ] AI-powered natural language event creation endpoint
+- [x] AI-powered event parsing
 - [ ] Update existing events
-- [ ] Delete events
 - [ ] Support for multiple calendars
 - [ ] Event filtering and search
 - [ ] Webhook support for real-time updates
-- [ ] User management and multi-tenant support
-- [ ] Event analytics and reporting
