@@ -85,7 +85,7 @@ if "chat_history" not in st.session_state:
 # --- CHAT INPUT ---
 st.markdown("---")
 st.markdown("#### Enter your calendar command:")
-user_input = st.text_input("", "Enter your prompt here...", key="user_input")
+user_input = st.text_input("", "", key="user_input")
 send_btn = st.button("Send", type="primary")
 
 # --- HANDLE CHAT SUBMISSION ---
